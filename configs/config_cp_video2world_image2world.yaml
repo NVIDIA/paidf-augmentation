@@ -1,0 +1,131 @@
+data:
+  - inputs:
+      rgb: "data/input.jpg"
+    output:
+      video: "data/cp_video2world_output.mp4"
+      caption: "data/cp_video2world_prompt.txt"
+      metadata: "data/cp_video2world_predict_metadata.json"
+
+endpoints:
+  vlm:
+    url: "http://localhost:8000/v1"
+    model: "vlm-model"
+  llm:
+    url: "http://localhost:8001/v1"
+    model: "llm-model"
+
+captioning:
+  vlm:
+    parser: "instruct"
+    system_prompt: |
+      You are a helpful assistant. Respond with plain descriptive text only.
+    user_prompt: >
+      Analyze the video footage and generate a detailed description of
+      the visual elements in the scene. Focus on the physical environment,
+      objects, and events. Use objective, neutral language — do not
+      invent a story or speculate about causes or intentions.
+    parameters:
+      temperature: 0.6
+      top_p: 0.95
+      frequency_penalty: 1.05
+      max_tokens: 4096
+      stream: false
+
+  llm:
+    system_prompt: |
+      You are an expert at writing prompts for a video generation model.
+      You are given:
+      1. A caption describing the source scene (environment, objects, events).
+      2. Attribute-value pairs describing a target event to generate.
+      Your task:
+      - Keep the original source caption (scene description
+        and normal activity) as-is or lightly paraphrase.
+      - Append a new paragraph describing the target event using
+        the provided attribute values.
+      - Keep the event description concise (1-2 sentences). The model follows
+        simple prompts much better than complex ones.
+      - IMPORTANT: The camera viewpoint must remain completely static and fixed
+        throughout the entire video. Do not describe any camera movement, panning,
+        zooming, or angle changes. The scene is captured from a single, stationary
+        camera position.
+      Output only a JSON object with a single key "prompt" containing the full text.
+    example_prompt: |
+      High-angle overhead view of a 4-way urban intersection with marked crosswalks,
+      traffic signals, and multiple lanes. Surrounding environment includes trees,
+      sidewalks, and multi-story buildings. Weather appears overcast with dry road
+      conditions. Time of day appears to be midday based on lighting and traffic
+      volume. Camera positioned to capture full intersection including all approach
+      lanes and pedestrian crossings.
+
+      Normal traffic flow with multiple vehicles and motorcycles navigating the
+      intersection. Pedestrians crossing at designated crosswalks. Traffic signals
+      appear to be functioning normally with vehicles obeying right-of-way rules.
+      Moderate congestion observed during peak flow periods but no gridlock or
+      obstruction events.
+
+      A silver SUV tries to force the way into another sedan, which results in a collision.
+    parameters:
+      temperature: 0.3
+      top_p: 0.95
+      max_tokens: 1024
+      frequency_penalty: 1.05
+      presence_penalty: 0
+      stream: true
+
+    variables:
+      event_type: ["collision", "near-miss", "sudden braking", "lane departure", "pedestrian crossing violation"]
+
+augmentation:
+  model:
+    name: "cosmos-predict"
+    version: "2B"
+    executor_type: "local"
+
+  parameters:
+    inference_type: "image2world"
+    num_output_frames: 186
+    num_steps: 35
+    enable_autoregressive: true
+    chunk_size: 93
+    chunk_overlap: 2
+    seed: 42
+    guidance: 6
+    resolution: "none"
+    inference_name: "cp_image2world"
+
+  local_parameters:
+    num_processes: 4
+    master_port: 12341
+
+evaluators:
+  - attribute_verification:
+      enabled: true
+      question_generation:
+        system_prompt: |
+          You are an expert at creating multiple choice verification questions.
+          Your task is to generate a simple, direct question that can verify a
+          specific attribute in a video frame. The question must have 2-4 answer
+          options and test for a specific visual attribute. The question should be
+          answerable by looking at a single frame from the video.
+          Output your response as a single JSON object with no additional text or formatting.
+        parameters:
+          retry: 1
+          temperature: 0.2
+          top_p: 0.95
+          frequency_penalty: 0.0
+          presence_penalty: 0.0
+          max_tokens: 2048
+          stream: true
+      vlm_verification:
+        system_prompt: |
+          You are an expert vision model tasked with answering multiple choice questions
+          about images. Analyze the image carefully and select the single best answer from
+          the provided options. Respond with ONLY a single letter (A, B, C, or D)
+          corresponding to your answer. Do not include any explanation or additional text.
+        parameters:
+          retry: 0
+          temperature: 0.0
+          top_p: 1.0
+          frequency_penalty: 0.0
+          max_tokens: 10
+          stream: false

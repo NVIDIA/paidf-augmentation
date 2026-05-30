@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+services:
+  paidf-augmentation:
+    image: paidf-augmentation:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    network_mode: host
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      OMNI_STORAGE_ENABLED: "${OMNI_STORAGE_ENABLED:-0}"
+      OMNI_STORAGE_HOST: "${OMNI_STORAGE_HOST:-127.0.0.1}"
+      OMNI_STORAGE_PORT: "${OMNI_STORAGE_PORT:-50002}"
+      VLM_ENDPOINT_URL: "${VLM_ENDPOINT_URL:-http://localhost:9001/v1}"
+      VLM_ENDPOINT_MODEL: "${VLM_ENDPOINT_MODEL:-nvidia/cosmos-reason1-7b}"
+      VLM_VERIFICATION_ENDPOINT_URL: "${VLM_VERIFICATION_ENDPOINT_URL:-http://localhost:9001/v1}"
+      VLM_VERIFICATION_ENDPOINT_MODEL: "${VLM_VERIFICATION_ENDPOINT_MODEL:-nvidia/cosmos-reason1-7b}"
+      COSMOS_ENDPOINT_URL: "${COSMOS_ENDPOINT_URL:-http://localhost:30002/}"
+      COSMOS_ENDPOINT_MODEL: "${COSMOS_ENDPOINT_MODEL:-nvidia/Cosmos-Transfer1-7B}"
+      LLM_ENDPOINT_URL: "${LLM_ENDPOINT_URL:-https://integrate.api.nvidia.com/v1}"
+      LLM_ENDPOINT_MODEL: "${LLM_ENDPOINT_MODEL:-nvidia/llama-3.3-nemotron-super-49b-v1}"
+      LLM_VERIFICATION_ENDPOINT_URL: "${LLM_VERIFICATION_ENDPOINT_URL:-https://integrate.api.nvidia.com/v1}"
+      LLM_VERIFICATION_ENDPOINT_MODEL: "${LLM_VERIFICATION_ENDPOINT_MODEL:-nvidia/llama-3.3-nemotron-super-49b-v1}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      VLM_API_KEY: "${VLM_API_KEY:-}"
+      LLM_API_KEY: "${LLM_API_KEY:-}"
+    volumes:
+      - ../modules:/app/modules
+      - ../configs:/app/configs
+      - ../data:/app/data
+      # Mount secrets.json for MSC storage configuration
+      - ./secrets.json:/var/secrets/secrets.json:ro
+    entrypoint: ["/bin/bash"]
+    tty: true
+    stdin_open: true

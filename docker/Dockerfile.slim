@@ -1,0 +1,227 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Slim image without local Cosmos executor - uses remote API only
+FROM nvcr.io/nvidia/base/ubuntu:jammy-20251013
+
+# Use bash with pipefail so RUN steps fail on upstream errors inside pipes.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# Run as non-root user for security (10000 avoids conflict with base image's UID 1000)
+ARG APP_UID=10000
+ARG APP_GID=10000
+RUN groupadd --gid ${APP_GID} nvidia \
+    && useradd --uid ${APP_UID} --gid ${APP_GID} --create-home --shell /bin/bash nvidia
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    UV_LINK_MODE=copy
+
+# -------- OS deps (FFmpeg+OpenCV build toolchain + runtime libs) --------
+# Mirrors the main image's LGPL FFmpeg story so the slim image has identical
+# scan posture: source-built FFmpeg in /usr/local, opencv from sdist with
+# WITH_FFMPEG=OFF, PyAV source-built against /usr/local FFmpeg.
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        curl \
+        git \
+        jq \
+        ninja-build \
+        pkg-config \
+        wget \
+        yasm \
+        nasm \
+        libgnutls28-dev \
+        libgl1 \
+        libglib2.0-0 \
+        libgomp1 \
+        libjpeg-dev \
+        libpng-dev \
+        libtiff-dev \
+        libwebp-dev \
+        zlib1g-dev \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
+# -------- FFmpeg source build (LGPL-only: no GPL/nonfree for Apache 2.0 release) --------
+ARG FFMPEG_VERSION=8.1
+ARG FFMPEG_SHA256=b072aed6871998cce9b36e7774033105ca29e33632be5b6347f3206898e0756a
+ARG NV_CODEC_HEADERS_VERSION=n12.1.14.0
+RUN set -euxo pipefail; \
+    mkdir -p /tmp/ffmpeg-build /usr/share/oss-sources/source-builds && cd /tmp/ffmpeg-build; \
+    git clone --depth 1 --branch "${NV_CODEC_HEADERS_VERSION}" \
+        https://github.com/FFmpeg/nv-codec-headers.git; \
+    tar -C /tmp/ffmpeg-build --exclude='.git' \
+        -czf "/usr/share/oss-sources/source-builds/nv-codec-headers-${NV_CODEC_HEADERS_VERSION}.tar.gz" nv-codec-headers; \
+    make -C nv-codec-headers -j"$(nproc)" && make -C nv-codec-headers install; \
+    curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" \
+        -o ffmpeg.tar.xz; \
+    echo "${FFMPEG_SHA256}  ffmpeg.tar.xz" | sha256sum -c -; \
+    cp ffmpeg.tar.xz "/usr/share/oss-sources/source-builds/ffmpeg-${FFMPEG_VERSION}.tar.xz"; \
+    tar -xf ffmpeg.tar.xz; \
+    cd "ffmpeg-${FFMPEG_VERSION}"; \
+    ./configure \
+      --prefix=/usr/local \
+      --disable-debug \
+      --disable-doc \
+      --disable-static \
+      --enable-shared \
+      --enable-pic \
+      --enable-gnutls \
+      --disable-nonfree \
+      --disable-gpl \
+      --disable-vulkan \
+      --disable-cuda-nvcc \
+      --enable-cuvid \
+      --enable-nvenc \
+      --extra-cflags="-I/usr/local/include" \
+      --extra-ldflags="-L/usr/local/lib"; \
+    make -j"$(nproc)"; \
+    make install; \
+    ldconfig; \
+    rm -rf /tmp/ffmpeg-build; \
+    ffmpeg -hide_banner -version | head -n 3; \
+    ! ffmpeg -buildconf | grep -E "enable-gpl|enable-nonfree"; \
+    ffmpeg -hide_banner -encoders 2>/dev/null | grep -E "\\bh264_nvenc\\b" >/dev/null; \
+    ffmpeg -hide_banner -encoders 2>/dev/null | grep -E "\\bmpeg4\\b" >/dev/null
+
+RUN apt-get purge -y --auto-remove yasm nasm && rm -rf /var/lib/apt/lists/*
+
+ENV YQ_VERSION=v4.52.2
+ENV YQ_BINARY=yq_linux_amd64
+ARG YQ_SHA256=6acbc0ee0ce7d457c64407acc44a9607fff065cc436433407e27e7370c51a694
+RUN mkdir -p /usr/share/oss-sources && \
+    wget -qO /tmp/yq.tar.gz "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${YQ_BINARY}.tar.gz" && \
+    echo "${YQ_SHA256}  /tmp/yq.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/yq.tar.gz && rm /tmp/yq.tar.gz && \
+    mv ${YQ_BINARY} /usr/local/bin/yq && \
+    curl -fsSL "https://github.com/mikefarah/yq/archive/refs/tags/${YQ_VERSION}.tar.gz" \
+        -o "/usr/share/oss-sources/yq-${YQ_VERSION}.tar.gz"
+
+# Install uv system-wide. Pinned so the source tarball baked into
+# /usr/share/oss-sources/ matches the binary we ship.
+COPY --from=ghcr.io/astral-sh/uv:0.11.10 /uv /uvx /usr/local/bin/
+ENV PATH="/usr/local/bin:$PATH"
+# Put uv cache and Python in a location we can chown for the non-root user
+ENV UV_HOME=/opt/uv
+ARG UV_VERSION=0.11.10
+RUN mkdir -p /opt/uv /usr/share/oss-sources && \
+    curl -fsSL "https://github.com/astral-sh/uv/archive/refs/tags/${UV_VERSION}.tar.gz" \
+        -o "/usr/share/oss-sources/uv-${UV_VERSION}.tar.gz"
+
+WORKDIR /app
+
+# Copy source (excluding cosmos-related dist files)
+COPY modules /app/modules
+COPY configs /app/configs
+COPY pyproject.toml ./
+RUN uv lock
+
+ARG PYTHON_VERSION=3.11
+# Install the requested CPython, then preserve the matching upstream source
+# tarball for OSS compliance. The patch version is detected from uv's install
+# layout so the source matches the binary even when PYTHON_VERSION is unpinned.
+RUN uv python install ${PYTHON_VERSION} && \
+    INSTALLED_PY_VER=$(ls -1d /root/.local/share/uv/python/cpython-*.*.*-*/ 2>/dev/null \
+        | head -n1 | sed -E 's|.*/cpython-([0-9]+\.[0-9]+\.[0-9]+)[^/]*/?|\1|') && \
+    [ -n "${INSTALLED_PY_VER}" ] || { echo "Could not determine installed CPython version"; exit 1; } && \
+    mkdir -p /usr/share/oss-sources && \
+    curl -fsSL "https://www.python.org/ftp/python/${INSTALLED_PY_VER}/Python-${INSTALLED_PY_VER}.tar.xz" \
+        -o "/usr/share/oss-sources/Python-${INSTALLED_PY_VER}.tar.xz"
+RUN uv sync --locked --python ${PYTHON_VERSION} --link-mode=copy --no-dev
+
+# -------- OpenCV: rebuild from sdist with WITH_FFMPEG=OFF (Apache 2.0 release) --------
+ARG OPENCV_PYTHON_VERSION=4.12.0.88
+RUN set -euxo pipefail; \
+    uv pip uninstall opencv-python opencv-python-headless \
+        opencv-contrib-python opencv-contrib-python-headless 2>/dev/null || true; \
+    rm -rf /app/.venv/lib/python${PYTHON_VERSION}/site-packages/cv2 \
+           /app/.venv/lib/python${PYTHON_VERSION}/site-packages/opencv_python.libs \
+           /app/.venv/lib/python${PYTHON_VERSION}/site-packages/opencv_python-*.dist-info \
+           /app/.venv/lib/python${PYTHON_VERSION}/site-packages/opencv_python_headless.libs \
+           /app/.venv/lib/python${PYTHON_VERSION}/site-packages/opencv_python_headless-*.dist-info \
+           /app/.venv/lib/python${PYTHON_VERSION}/site-packages/opencv_contrib_python*.dist-info \
+           /app/.venv/lib/python${PYTHON_VERSION}/site-packages/opencv_contrib_python*.libs; \
+    uv pip install --no-cache --link-mode=copy \
+        "setuptools>=80.9.0" "wheel>=0.46.2" \
+        "scikit-build>=0.18,<1" "cmake>=3.27,<4" "numpy>=2.1.0,<3" "pip>=25.3"
+RUN set -euxo pipefail; \
+    ENABLE_CONTRIB=0 \
+    ENABLE_HEADLESS=1 \
+    CMAKE_ARGS="-DWITH_FFMPEG=OFF -DWITH_GSTREAMER=OFF -DWITH_V4L=OFF -DWITH_LIBV4L=OFF -DWITH_QT=OFF -DWITH_GTK=OFF -DOPENCV_ENABLE_NONFREE=OFF -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF" \
+    /app/.venv/bin/python -m pip install --no-cache-dir --no-build-isolation \
+        --no-binary=opencv-python \
+        "opencv-python==${OPENCV_PYTHON_VERSION}"
+RUN /app/.venv/bin/python -c "import re, sys, cv2; info = cv2.getBuildInformation(); sys.exit('OpenCV unexpectedly built WITH FFmpeg') if re.search(r'FFMPEG:\\s+YES', info) else print('cv2', cv2.__version__, 'WITH_FFMPEG=OFF OK')" && \
+    ! find /app/.venv/lib/python${PYTHON_VERSION}/site-packages -name 'cv2*.so' -exec ldd {} \; \
+        | grep -E 'libav(codec|device|filter|format|util)|libswresample|libswscale'
+
+# -------- PyAV: source build linked to /usr/local LGPL FFmpeg --------
+ARG PYAV_VERSION=16.1.0
+RUN set -euxo pipefail; \
+    uv pip uninstall av 2>/dev/null || true; \
+    rm -rf /app/.venv/lib/python${PYTHON_VERSION}/site-packages/av \
+           /app/.venv/lib/python${PYTHON_VERSION}/site-packages/av-*.dist-info \
+           /app/.venv/lib/python${PYTHON_VERSION}/site-packages/av.libs; \
+    uv pip install --no-cache --link-mode=copy \
+        "setuptools>=80.9.0" "cython>=3.1.0,<4" "pip>=25.3"; \
+    PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}" \
+    /app/.venv/bin/python -m pip install --no-cache-dir --no-build-isolation \
+        --no-binary av \
+        "av==${PYAV_VERSION}"; \
+    /app/.venv/bin/python -c "import av, av._core; print('pyav', av.__version__, 'core', av._core.__file__)"
+
+# Preserve sdists for the python packages we source-built, alongside FFmpeg/
+# nv-codec-headers sources under /usr/share/oss-sources/source-builds/. The
+# PyPI JSON entry carries both the sdist URL and its published SHA-256 digest;
+# we verify the downloaded file against the latter.
+RUN set -e; \
+    mkdir -p /usr/share/oss-sources/source-builds; \
+    for spec in "opencv-python:${OPENCV_PYTHON_VERSION}" "av:${PYAV_VERSION}"; do \
+        name="${spec%%:*}"; ver="${spec##*:}"; \
+        meta=$(curl -fsSL "https://pypi.org/pypi/${name}/${ver}/json" \
+            | jq -r '.urls[] | select(.packagetype=="sdist") | [.url, .digests.sha256] | @tsv' | head -n1); \
+        url="${meta%%$'\t'*}"; sha="${meta##*$'\t'}"; \
+        [ -n "$url" ] && [ -n "$sha" ] || { echo "No sdist metadata for ${name}==${ver}"; exit 1; }; \
+        out="/usr/share/oss-sources/source-builds/$(basename "$url")"; \
+        curl -fsSL "$url" -o "$out"; \
+        echo "${sha}  ${out}" | sha256sum -c -; \
+    done
+
+# Defensive scan: fail if any opencv_python*.libs/libav* slipped back in.
+RUN set -euxo pipefail; \
+    leftovers="$(find /app/.venv/lib/python${PYTHON_VERSION}/site-packages \( \
+        -path '*opencv_python*.libs/libavcodec*' -o \
+        -path '*opencv_python*.libs/libavdevice*' -o \
+        -path '*opencv_python*.libs/libavfilter*' -o \
+        -path '*opencv_python*.libs/libavformat*' -o \
+        -path '*opencv_python*.libs/libavutil*' -o \
+        -path '*opencv_python*.libs/libswresample*' -o \
+        -path '*opencv_python*.libs/libswscale*' \
+        -o -path '*av.libs/libav*' \
+        \) -print 2>/dev/null || true)"; \
+    if [ -n "$leftovers" ]; then echo "$leftovers"; exit 1; fi
+
+# Remove build-only packages to shrink attack surface.
+RUN apt-get update \
+    && apt-get purge -y --auto-remove \
+        build-essential \
+        cmake \
+        ninja-build \
+        pkg-config \
+        git \
+        wget \
+        libgnutls28-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Ensure non-root user can use the app and venv interpreter (UV_HOME)
+RUN chown -R nvidia:nvidia /app /opt/uv
+
+USER nvidia
+
+# Default entrypoint runs Python; override CMD to choose script
+ENTRYPOINT ["uv", "run", "--no-sync", "/app/modules/cli.py"]

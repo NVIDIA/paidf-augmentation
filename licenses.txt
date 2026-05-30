@@ -1,0 +1,122 @@
+== augmentation (/app/pyproject.toml) ==
+
+                                                 
+                      Info                       
+┏━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Item            ┃ Value                       ┃
+┡━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ program         │ licensecheck                │
+│ version         │ 2025.1.0                    │
+│ license         │ MIT LICENSE                 │
+│ project_license │ NO LICENSE/ UNKNOWN LICENSE │
+└─────────────────┴─────────────────────────────┘
+                                                                                
+                                List Of Packages                                
+┏━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Compatible ┃ Package                   ┃ License(s)                          ┃
+┡━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ ✔          │ annotated-types           │ MIT LICENSE                         │
+│ ✔          │ antlr4-python3-runtime    │ BSD                                 │
+│ ✔          │ anyio                     │ MIT                                 │
+│ ✔          │ attrs                     │ MIT LICENSE                         │
+│ ✔          │ av                        │ BSD-3-CLAUSE                        │
+│ ✔          │ boto3                     │ APACHE-2.0                          │
+│ ✔          │ botocore                  │ APACHE-2.0                          │
+│ ✔          │ bracex                    │ MIT                                 │
+│ ✖          │ certifi                   │ MOZILLA PUBLIC LICENSE 2.0 _MPL     │
+│            │                           │ 2.0_                                │
+│ ✔          │ cffi                      │ MIT                                 │
+│ ✔          │ charset-normalizer        │ MIT                                 │
+│ ✔          │ distro                    │ APACHE SOFTWARE LICENSE             │
+│ ✔          │ exceptiongroup            │ MIT LICENSE                         │
+│ ✔          │ filelock                  │ MIT                                 │
+│ ✔          │ fsspec                    │ BSD-3-CLAUSE                        │
+│ ✔          │ gradio-client             │ APACHE-2.0                          │
+│ ✔          │ h11                       │ MIT LICENSE                         │
+│ ✔          │ hf-xet                    │ APACHE SOFTWARE LICENSE             │
+│ ✔          │ httpcore                  │ BSD-3-CLAUSE                        │
+│ ✔          │ httpx                     │ BSD LICENSE                         │
+│ ✔          │ huggingface-hub           │ APACHE SOFTWARE LICENSE             │
+│ ✔          │ idna                      │ BSD-3-CLAUSE                        │
+│ ✔          │ jiter                     │ MIT                                 │
+│ ✔          │ jmespath                  │ MIT LICENSE                         │
+│ ✔          │ jsonschema                │ MIT                                 │
+│ ✔          │ jsonschema-specifications │ MIT                                 │
+│ ✔          │ lark                      │ MIT LICENSE                         │
+│ ✔          │ multi-storage-client      │ APACHE SOFTWARE LICENSE             │
+│ ✔          │ numpy                     │ BSD LICENSE                         │
+│ ✔          │ omegaconf                 │ BSD LICENSE                         │
+│ ✔          │ openai                    │ APACHE SOFTWARE LICENSE             │
+│ ✔          │ opencv-python-headless    │ APACHE SOFTWARE LICENSE             │
+│ ✔          │ opentelemetry-api         │ APACHE-2.0                          │
+│ ✔          │ packaging                 │ APACHE-2.0;; BSD-2-CLAUSE           │
+│ ✔          │ prettytable               │ BSD-3-CLAUSE                        │
+│ ✔          │ psutil                    │ BSD-3-CLAUSE                        │
+│ ✔          │ pycparser                 │ BSD-3-CLAUSE                        │
+│ ✔          │ pydantic                  │ MIT                                 │
+│ ✔          │ pydantic-core             │ MIT                                 │
+│ ✔          │ python-dateutil           │ APACHE SOFTWARE LICENSE;; BSD       │
+│            │                           │ LICENSE                             │
+│ ✔          │ pyyaml                    │ MIT LICENSE                         │
+│ ✔          │ referencing               │ MIT                                 │
+│ ✔          │ requests                  │ APACHE SOFTWARE LICENSE             │
+│ ✔          │ rpds-py                   │ MIT                                 │
+│ ✔          │ s3transfer                │ APACHE SOFTWARE LICENSE             │
+│ ✔          │ six                       │ MIT LICENSE                         │
+│ ✔          │ sniffio                   │ APACHE SOFTWARE LICENSE;; MIT       │
+│            │                           │ LICENSE                             │
+│ ✔          │ tqdm                      │ MIT;; MPL-2.0                       │
+│ ✔          │ typing-extensions         │ PSF-2.0                             │
+│ ✔          │ typing-inspection         │ MIT                                 │
+│ ✔          │ tzdata                    │ APACHE-2.0                          │
+│ ✔          │ urllib3                   │ MIT                                 │
+│ ✔          │ wcmatch                   │ MIT                                 │
+│ ✔          │ wcwidth                   │ MIT                                 │
+│ ✔          │ xattr                     │ MIT                                 │
+└────────────┴───────────────────────────┴─────────────────────────────────────┘
+
+
+== cosmos-transfer2.5 (/opt/cosmos-transfer2.5/pyproject.toml) ==
+
+                                    
+                Info                
+┏━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┓
+┃ Item            ┃ Value          ┃
+┡━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━┩
+│ program         │ licensecheck   │
+│ version         │ 2025.1.0       │
+│ license         │ MIT LICENSE    │
+│ project_license │ APACHE LICENSE │
+└─────────────────┴────────────────┘
+                        
+     List Of Errors     
+┏━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Package              ┃
+┡━━━━━━━━━━━━━━━━━━━━━━┩
+│ COSMOS-OSS           │
+│ VIDEO-DEPTH-ANYTHING │
+└──────────────────────┘
+                                                                                
+                                List Of Packages                                
+┏━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Compatible ┃ Package              ┃ License(s)                               ┃
+┡━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ ✔          │ ATTRS                │ MIT LICENSE                              │
+│ ✔          │ CATTRS               │ MIT LICENSE                              │
+│ ✔          │ EASYDICT             │ GNU LESSER GENERAL PUBLIC LICENSE V3     │
+│            │                      │ _LGPLV3_                                 │
+│ ✔          │ EXCEPTIONGROUP       │ MIT LICENSE                              │
+│ ✔          │ GLCONTEXT            │ MIT LICENSE                              │
+│ ✔          │ MODERNGL             │ MIT LICENSE                              │
+│ ✔          │ NATSORT              │ MIT LICENSE                              │
+│ ✔          │ NUMPY                │ 0BSD;; BSD-3-CLAUSE;; CC0-1.0;; MIT;;    │
+│            │                      │ ZLIB                                     │
+│ ✔          │ OPENEXR              │ BSD-3-CLAUSE                             │
+│ ✔          │ PYARROW              │ APACHE-2.0                               │
+│ ✔          │ SAM2                 │ APACHE 2.0                               │
+│ ✔          │ SHAPELY              │ BSD LICENSE                              │
+│ ✔          │ TYPING-EXTENSIONS    │ PSF-2.0                                  │
+│ ✔          │ VIDEO-DEPTH-ANYTHING │ APACHE-2.0                               │
+└────────────┴──────────────────────┴──────────────────────────────────────────┘
+
+

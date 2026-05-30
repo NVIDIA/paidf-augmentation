@@ -1,0 +1,143 @@
+# Cosmos Transfer 2.5 — VLM+LLM captioning (Carla traffic scenes)
+
+data:
+  - inputs:
+      rgb: "/path/to/input/rgb.mp4"
+      controls:
+        edge: "/path/to/input/edge.mp4"
+    output:
+      video: "/path/to/output/carla_vlm_llm_augmented.mp4"
+      caption: "/path/to/output/carla_vlm_llm_prompt.txt"
+      metadata: "/path/to/output/carla_vlm_llm_metadata.json"
+
+endpoints:
+  vlm:
+    url: "http://localhost:8000/v1"
+    model: "Qwen/Qwen3-VL-30B-A3B-Instruct"
+  llm:
+    url: "http://localhost:8001/v1"
+    model: "Qwen/Qwen2.5-14B-Instruct"
+
+pipeline:
+  retry: 3
+  regenerate_caption_on_retry: true
+  logging:
+    enabled: true
+    level: "INFO"
+
+captioning:
+  vlm:
+    parser: "instruct"
+    system_prompt: |
+      You are a helpful assistant that describes traffic-scene video content.
+      You MUST ONLY describe the scene itself, never video quality or technical artifacts.
+      Respond with plain descriptive text only.
+    user_prompt: |
+      Describe this traffic intersection surveillance footage.
+      Focus on weather, time of day, lighting, road condition, vehicles, pedestrians,
+      traffic signals, and the static environment.
+      Do not suggest edits. Only describe what is currently visible in the source footage.
+    parameters:
+      retry: 1
+      temperature: 0.3
+      top_p: 0.95
+      frequency_penalty: 1.05
+      max_tokens: 4096
+      stream: false
+      fps: 4.0
+      max_pixels: 307200
+
+  llm:
+    system_prompt: |
+      You are an expert at writing concise prompts for a video generation model.
+      You are given:
+      1. A caption describing the source traffic scene.
+      2. Attribute-value pairs describing the desired target conditions.
+      Generate a single natural-language prompt that changes the scene to match the
+      target attributes while preserving viewpoint, scene layout, vehicle motion,
+      and object consistency.
+      Output only a JSON object with a single key "prompt" (or "caption") containing
+      the final sentence.
+    example_prompt: |
+      Change the traffic scene to a rainy night setting with wet roads while
+      preserving the original camera viewpoint, traffic layout, and object motion.
+    parameters:
+      temperature: 0.3
+      top_p: 0.95
+      max_tokens: 512
+      frequency_penalty: 1.05
+      presence_penalty: 0
+      stream: true
+    variables:
+      weather_condition: ["raining"]
+      lighting_condition: ["night"]
+      road_condition: ["wet"]
+
+augmentation:
+  model:
+    name: "cosmos-transfer2.5"
+    version: "ct2.5"
+    executor_type: "local"
+
+  parameters:
+    sigma: 90
+    seed: null
+    guidance: 3
+    num_steps: 35
+    inference_name: "cosmos_transfer_inference"
+  local_parameters:
+    num_processes: 1    # number of GPUs
+  modalities:
+    edge: 1.0
+    positive_prompt: |
+      cinematic, photorealistic, ultra high quality, ultra high resolution,
+      high fidelity, high definition, realistic traffic scene with proper
+      physics and coherent motion
+    negative_prompt: |
+      The video captures a game playing, with bad crappy graphics and cartoonish
+      frames. It represents a recording of old outdated games. The lighting looks
+      very fake. The textures are very raw and basic. The geometries are very
+      primitive. The images are very pixelated and of poor CG quality. There are
+      many subtitles in the footage. Overall, the video is unrealistic at all.
+
+evaluators:
+  - hallucination_check:
+      enabled: true
+      threshold: 0.682
+      params:
+        grad_thresh: 10.0
+        blur_ksize: 7
+        morph_k: 3
+        dist_tol_px: 7.0
+        max_frames: null
+  - attribute_verification:
+      enabled: true
+      question_generation:
+        system_prompt: |
+          You are an expert at creating multiple choice verification questions.
+          Your task is to generate a simple, direct question that can verify a
+          specific attribute in a video frame. The question must have 2-4 answer
+          options and test for a specific visual attribute. The question should be
+          answerable by looking at a single frame from the video.
+          Output your response as a single JSON object with no additional text or formatting.
+        parameters:
+          retry: 1
+          temperature: 0.2
+          top_p: 0.95
+          frequency_penalty: 0.0
+          presence_penalty: 0.0
+          max_tokens: 2048
+          stream: true
+      vlm_verification:
+        system_prompt: |
+          You are an expert vision model tasked with answering multiple choice questions
+          about images. Analyze the image carefully and select the single best answer from
+          the provided options. Respond with ONLY a single letter (A, B, C, or D)
+          corresponding to your answer. Do not include any explanation or additional text.
+        parameters:
+          retry: 0
+          temperature: 0.0
+          top_p: 1.0
+          frequency_penalty: 0.0
+          max_tokens: 10
+          stream: false
