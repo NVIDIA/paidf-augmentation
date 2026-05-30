@@ -1,0 +1,86 @@
+# Starter config — first-run validation of the pipeline on the bundled
+# sample at data/sample_input.mp4. See README "Run inference" for setup.
+#
+# VLM/LLM URLs are intentionally left empty here; the CLI reads them
+# from VLM_ENDPOINT_URL / LLM_ENDPOINT_URL in examples/.env.
+
+data:
+  - inputs:
+      rgb: "/app/data/sample_input.mp4"
+      controls:
+        edge: null
+    output:
+      video: "/app/data/sample_output.mp4"
+      caption: "/app/data/sample_caption.txt"
+      metadata: "/app/data/sample_metadata.json"
+
+endpoints:
+  vlm:
+    url: ""
+    model: "Qwen/Qwen3-VL-30B-A3B-Instruct"
+  llm:
+    url: ""
+    model: "Qwen/Qwen2.5-14B-Instruct"
+
+captioning:
+  vlm:
+    parser: "instruct"
+    system_prompt: |
+      You are a helpful assistant that describes video content.
+      You MUST ONLY describe the scene itself, never video quality or technical artifacts.
+      Respond with plain descriptive text only.
+    user_prompt: |
+      Describe this video scene. Focus on weather, time of day, lighting,
+      environment, objects, and any motion or activity.
+    parameters:
+      temperature: 0.3
+      top_p: 0.95
+      max_tokens: 4096
+      stream: false
+      fps: 4.0
+      max_pixels: 307200
+
+  llm:
+    system_prompt: |
+      You are an expert at writing concise prompts for a video generation model.
+      You are given:
+      1. A caption describing the source scene.
+      2. Attribute-value pairs describing the desired target conditions.
+      Generate a single natural-language prompt that transforms the scene to match
+      the target attributes while preserving viewpoint, layout, and object motion.
+      Output only a JSON object with a single key "prompt" containing the final sentence.
+    parameters:
+      temperature: 0.3
+      top_p: 0.95
+      max_tokens: 512
+      stream: false
+    variables:
+      weather_condition: ["raining"]
+      lighting_condition: ["night"]
+
+augmentation:
+  model:
+    name: "cosmos-transfer2.5"
+    version: "ct2.5"
+    executor_type: "local"
+  parameters:
+    sigma: 90
+    seed: 42
+    guidance: 3
+    num_steps: 35
+    inference_name: "starter"
+  local_parameters:
+    num_processes: 4
+  modalities:
+    edge: 1.0
+
+evaluators:
+  - hallucination_check:
+      enabled: true
+      threshold: 0.682
+      params:
+        grad_thresh: 10.0
+        blur_ksize: 7
+        morph_k: 3
+        dist_tol_px: 7.0
+        max_frames: null

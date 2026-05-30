@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=80", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv]
+managed = true
+
+[project]
+name = "paidf-augmentation"
+version = "1.0.0"
+description = "Physical AI Data Factory (PAIDF) Augmentation: a pipeline for processing camera data through generative AI models (Cosmos Transfer, Cosmos Predict, image-edit, and more)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyyaml>=6.0",
+    "gradio-client>=0.10.0",
+    "openai>=1.0.0",
+    "requests>=2.31.0",
+    "multi-storage-client==0.36.0",
+    "multi-storage-client[boto3]==0.36.0",
+    "omegaconf>=2.3.0",
+    "pydantic>=2.12.0",
+    "opencv-python-headless==4.12.0.88",
+    "av==16.1.0",
+    # Cosmos/transformers require huggingface-hub<1.0; pin so uv sync does not upgrade past it
+    "huggingface-hub>=0.30.0,<1.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["modules*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.13.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = [
+    ".",
+    "modules",
+]
+
+[tool.coverage.run]
+source = [
+    ".",
+    "modules",
+]
+omit = [
+    "*/tests/*",
+    "*/test_*",
+]
+
+[tool.coverage.report]
+show_missing = true
+precision = 2

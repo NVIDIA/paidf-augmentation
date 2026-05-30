@@ -1,0 +1,7 @@
+.git/
+.venv/
+.coderabbit.yaml
+*.json
+*.env
+*.egg-info
+uv.lock

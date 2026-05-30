@@ -1,0 +1,35 @@
+data_dir:  /path/to/input_images
+n_augmentations: 3
+config_output: /path/to/generated_configs
+output_root: /path/to/augmented_outputs
+example_augmentation_config: configs/config_image_edit_verification.yaml
+variables:
+  top_outer_color: {"beige": 0.0769, "black": 0.0769, "blue": 0.0769, "brown": 0.0769, "camouflage": 0.0769, "green": 0.0769, "grey": 0.0769, "orange": 0.0769, "pink": 0.0769, "purple": 0.0769, "red": 0.0769, "white": 0.0769, "yellow": 0.0769}
+  top_outer_type: {"camisole": 0.1429, "knee-length coat": 0.1429, "hoodie": 0.1429, "cropped jacket": 0.1429, "robe": 0.1429, "sweater": 0.1429, "vest": 0.1429}
+  bottom_type: {"dress": 0.2, "leggings": 0.2, "jeans": 0.2, "shorts": 0.2, "skirt": 0.2}
+  bottom_color: {"beige": 0.0769, "black": 0.0769, "blue": 0.0769, "brown": 0.0769, "camouflage": 0.0769, "green": 0.0769, "grey": 0.0769, "orange": 0.0769, "pink": 0.0769, "purple": 0.0769, "red": 0.0769, "white": 0.0769, "yellow": 0.0769}
+  shoe_type: {"barefoot": 0.1429, "boots": 0.1429, "flip-flops": 0.1429, "high heels": 0.1429, "sandals": 0.1429, "sneakers": 0.1429}
+  colors:
+    beige: {"tan": 0.3842, "khaki": 0.3632, "cream": 0.1895, "light beige": 0.0632}
+    black: {"charcoal black": 0.5709, "dark charcoal": 0.1468, "charcoal": 0.1419, "jet black": 0.1404}
+    blue: {"navy blue": 0.4252, "denim blue": 0.2014, "light blue": 0.1531, "dark blue": 0.1164, "royal blue": 0.1038}
+    brown: {"dark brown": 0.8961, "olive brown": 0.1039}
+    camouflage: {"grey camouflage": 0.4, "green camouflage": 0.3, "dark green camouflage": 0.2, "olive green camouflage": 0.1}
+    green: {"olive green": 0.5618, "dark green": 0.1011, "lime green": 0.0843, "emerald green": 0.0787, "teal": 0.073, "mint green": 0.0674, "teal green": 0.0337}
+    grey: {"light grey": 0.4246, "dark grey": 0.4089, "charcoal grey": 0.0615, "heather grey": 0.0555, "silver": 0.0495}
+    orange: {"bright orange": 0.2777, "mustard orange": 0.1667, "burnt orange": 0.1389, "terracotta": 0.1389,  "apricot": 0.0834, "peach": 0.0834, "copper": 0.0555, "saffron": 0.0555}
+    pink: {"light pink": 0.5334, "salmon pink": 0.162, "pale pink": 0.0857, "dusty pink": 0.0761, "dusty rose": 0.0761, "rose pink": 0.0667}
+    purple: {"dark purple": 0.3624, "lavender": 0.2174, "magenta": 0.2174, "violet": 0.1449, "mauve": 0.0579}
+    red: {"maroon": 0.4375, "bright red": 0.3203, "crimson": 0.1875, "burgundy": 0.0547}
+    white: {"off-white": 0.9228, "pure white": 0.0772}
+    yellow: {"mustard yellow": 0.3382, "pale yellow": 0.25, "bright yellow": 0.2353, "neon yellow": 0.1176, "lemon yellow": 0.0588}
+conditional_variables:
+  shoe_color:
+    depends_on: shoe_type
+    distributions:
+      barefoot: {"none": 1.0}
+      boots: {"beige": 0.0833, "black": 0.0833, "blue": 0.0833, "brown": 0.0833, "green": 0.0833, "grey": 0.0833, "orange": 0.0833, "pink": 0.0833, "purple": 0.0833, "red": 0.0833, "white": 0.0833, "yellow": 0.0833}
+      flip-flops: {"beige": 0.0833, "black": 0.0833, "blue": 0.0833, "brown": 0.0833, "green": 0.0833, "grey": 0.0833, "orange": 0.0833, "pink": 0.0833, "purple": 0.0833, "red": 0.0833, "white": 0.0833, "yellow": 0.0833}
+      high heels: {"beige": 0.0833, "black": 0.0833, "blue": 0.0833, "brown": 0.0833, "green": 0.0833, "grey": 0.0833, "orange": 0.0833, "pink": 0.0833, "purple": 0.0833, "red": 0.0833, "white": 0.0833, "yellow": 0.0833}
+      sandals: {"beige": 0.0833, "black": 0.0833, "blue": 0.0833, "brown": 0.0833, "green": 0.0833, "grey": 0.0833, "orange": 0.0833, "pink": 0.0833, "purple": 0.0833, "red": 0.0833, "white": 0.0833, "yellow": 0.0833}
+      sneakers: {"beige": 0.0833, "black": 0.0833, "blue": 0.0833, "brown": 0.0833, "green": 0.0833, "grey": 0.0833, "orange": 0.0833, "pink": 0.0833, "purple": 0.0833, "red": 0.0833, "white": 0.0833, "yellow": 0.0833}
