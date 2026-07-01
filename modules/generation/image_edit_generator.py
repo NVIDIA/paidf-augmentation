@@ -12,6 +12,11 @@ from openai import OpenAI
 from .base import BaseGenerator
 from aug_utils.common import validate_and_cast_config_params
 
+# Fallback per-request timeout (seconds) when none is supplied (the configured
+# value comes from pipeline.request_timeout). A wedged/slow endpoint fails after
+# this instead of hanging; pipeline.retry then decides whether to re-call.
+DEFAULT_REQUEST_TIMEOUT = 120.0
+
 
 class ImageEditGenerator(BaseGenerator):
     """Image edit model generator for image-to-image editing via an OpenAI-compatible endpoint."""
@@ -34,6 +39,7 @@ class ImageEditGenerator(BaseGenerator):
         model: Optional[str] = None,
         api_key: Optional[str] = None,
         negative_prompt: Optional[str] = " ",
+        timeout: Optional[float] = None,
         **kwargs,
     ):
         super().__init__(logger)
@@ -57,16 +63,25 @@ class ImageEditGenerator(BaseGenerator):
         self.seed = validated_params["seed"]
         self.model = validated_params.get("model")
         self.negative_prompt = negative_prompt
+        self.timeout = DEFAULT_REQUEST_TIMEOUT if timeout is None else float(timeout)
+        if self.timeout <= 0:
+            raise ValueError("timeout must be > 0 seconds")
 
         # Some endpoints don't require auth; "dummy" is a placeholder that
         # makes the OpenAI client happy when no key is configured.
+        # max_retries=0: a wedged/slow endpoint should fail after `timeout`
+        # rather than the SDK silently re-issuing the request; pipeline.retry
+        # is the single source of retries.
         self.client = OpenAI(
             base_url=self.endpoint,
             api_key=api_key if api_key else "dummy",
+            timeout=self.timeout,
+            max_retries=0,
         )
 
         self.logger.info(
-            f"Image edit generator initialized with endpoint: {self.endpoint}"
+            f"Image edit generator initialized with endpoint: {self.endpoint} "
+            f"(request timeout {self.timeout:.0f}s, no client-side retries)"
         )
 
     def get_required_inputs(self) -> Dict[str, bool]:

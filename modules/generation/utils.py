@@ -2,10 +2,59 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import logging
 import os
 import subprocess
+import time
 
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
+
+
+def generate_with_retries(
+    generator,
+    prompt: str,
+    rgb_path: str,
+    control_inputs: Dict[str, str],
+    output_media_path: str,
+    max_retries: int,
+    backoff_base: float,
+    logger: logging.Logger,
+) -> Tuple[bool, Optional[str], float]:
+    """Run generation, re-calling the endpoint on failure with exponential backoff.
+
+    Each ``execute`` is one bounded request (the per-request timeout lives on the
+    endpoint client), so a hung server fails after that timeout. On failure the
+    endpoint is re-called up to ``max_retries`` times, waiting
+    ``backoff_base * 2**n`` seconds between attempts (backoff_base, 2x, 4x, ...).
+    The same request (same seed) is re-issued because the failure is the
+    endpoint, not the produced output.
+
+    Returns ``(success, output_path, elapsed_seconds)`` for the final attempt.
+    """
+    success = False
+    output_path = None
+    elapsed = 0.0
+    for attempt in range(max_retries + 1):
+        attempt_start = time.time()
+        try:
+            success, output_path = generator.execute(
+                prompt, rgb_path, control_inputs, output_media_path
+            )
+        except Exception as e:
+            success = False
+            logger.error(f"Generation error -> {output_media_path}: {e}")
+        elapsed = time.time() - attempt_start
+        if success:
+            return True, output_path, elapsed
+        if attempt < max_retries:
+            delay = backoff_base * (2**attempt)
+            logger.warning(
+                f"Generation failed (attempt {attempt + 1}/{max_retries + 1}); "
+                f"retrying in {delay:.0f}s (exponential backoff)..."
+            )
+            time.sleep(delay)
+    return False, output_path, elapsed
+
 
 FFPROBE_BIN = os.environ.get("FFPROBE_BIN", "ffprobe")
 FFPROBE_TIMEOUT_S = 30

@@ -3,6 +3,7 @@
 
 import argparse
 import os
+import sys
 import logging
 import yaml
 import json
@@ -14,6 +15,7 @@ from omegaconf import OmegaConf
 from captioning.factory import create_captioner
 from data_processing import run_alignment
 from generation.factory import create_generator
+from generation.utils import generate_with_retries
 from verification.llm_question_generator import LLMQuestionGenerator
 from verification.vlm_verifier import VLMVerifier
 from verification.core import AttributeVerifier
@@ -356,17 +358,20 @@ def main():
                 hallucination_enabled = hallucination_checker is not None
                 verification_enabled = attribute_verifier is not None
 
-                pipeline_cfg = config.get("pipeline") or {}
-                max_retries = int(pipeline_cfg.get("retry", 1))
+                max_retries = pipeline_config.pipeline.retry
+                request_timeout = pipeline_config.pipeline.request_timeout
                 if max_retries > 0:
                     logger.info(
-                        f"Evaluation retry enabled: up to {max_retries} retries"
+                        f"Retry enabled (pipeline.retry): up to {max_retries} "
+                        f"retries on evaluator failure (seed re-roll) or "
+                        f"generation/endpoint failure (exponential backoff from "
+                        f"{request_timeout:.0f}s)."
                     )
 
                 # Seed handling
                 aug_params = config.get("augmentation", {}).get("parameters", {})
-                regenerate_caption_on_retry = pipeline_cfg.get(
-                    "regenerate_caption_on_retry", True
+                regenerate_caption_on_retry = (
+                    pipeline_config.pipeline.regenerate_caption_on_retry
                 )
                 original_seed = aug_params.get("seed")
                 if original_seed in (None, "None", "none"):
@@ -416,14 +421,14 @@ def main():
                                 break
 
                     print()
-                    gen_start = time.time()
                     logger.info(f"Running generation (seed: {current_seed})...")
-                    try:
-                        if prompt is None:
-                            logger.error("Prompt is required for generation")
-                            break
 
-                        # Load control inputs from augmentation.modalities
+                    if prompt is None:
+                        logger.error("Prompt is required for generation")
+                        break
+
+                    # Load control inputs from augmentation.modalities
+                    try:
                         control_inputs = {}
                         modalities_cfg = (
                             config.get("augmentation", {}).get("modalities") or {}
@@ -452,26 +457,38 @@ def main():
                             logger.debug(
                                 f"Control inputs: {list(control_inputs.keys())}"
                             )
-
-                        success, output_path = generator.execute(
-                            prompt,
-                            rgb_path,
-                            control_inputs,
-                            output_media_path,
+                    except (TypeError, KeyError, ValueError, AttributeError) as e:
+                        logger.error(
+                            f"Failed to prepare control inputs -> {output_media_path}: {e}"
                         )
-                        if not success:
-                            logger.error(f"Generation failed -> {output_media_path}")
-                            break
-                        models_fetched = True
-                        generation_succeeded = True
-                        sample["output"]["video"] = output_path
-                        elapsed = (time.time() - gen_start) / 60
-                        logger.info(
-                            f"Generation done in {elapsed:.2f} min, saved to: {output_path}"
-                        )
-                    except Exception as e:
-                        logger.error(f"Generation error -> {output_media_path}: {e}")
                         break
+
+                    # Generate, re-calling the endpoint on failure up to the
+                    # pipeline.retry budget. Each call is bounded by request_timeout,
+                    # which is also the exponential-backoff base between retries.
+                    success, output_path, gen_elapsed = generate_with_retries(
+                        generator,
+                        prompt,
+                        rgb_path,
+                        control_inputs,
+                        output_media_path,
+                        max_retries,
+                        request_timeout,
+                        logger,
+                    )
+                    if not success:
+                        logger.error(
+                            f"Generation failed after {max_retries + 1} attempt(s) "
+                            f"-> {output_media_path}"
+                        )
+                        break
+                    models_fetched = True
+                    generation_succeeded = True
+                    sample["output"]["video"] = output_path
+                    logger.info(
+                        f"Generation done in {gen_elapsed / 60:.2f} min, "
+                        f"saved to: {output_path}"
+                    )
 
                     # ---- Hallucination check ----
                     passed_hallucination_check = True
@@ -662,6 +679,12 @@ def main():
                 verification_results = None
                 generation_succeeded = False
 
+            # A generator ran but produced no output after exhausting retries —
+            # log it and skip output/metadata so it isn't counted as completed.
+            if generator is not None and not generation_succeeded:
+                logger.error(f"Sample failed: {rgb_path or 'unknown'}")
+                continue
+
             # ---- Data processing (alignment, ...) ----
             alignment_params = None
             dp_model = pipeline_config.data_processing
@@ -750,9 +773,17 @@ def main():
 
         except Exception as e:
             logger.error(f"Unexpected error processing sample: {e}")
-            samples_processed += 1
-            tracker.update(percent=(samples_processed / total_samples) * 100)
             continue
+
+    # samples_processed counts only fully successful samples, so any shortfall
+    # means a sample failed (e.g. generation exhausted its retries); exit
+    # non-zero without marking the task complete.
+    if samples_processed < total_samples:
+        logger.error(
+            f"{total_samples - samples_processed}/{total_samples} sample(s) "
+            f"failed; pipeline aborted without completion."
+        )
+        sys.exit(1)
 
     tracker.complete(metadata={"totalSamplesProcessed": samples_processed})
 

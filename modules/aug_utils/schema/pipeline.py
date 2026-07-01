@@ -40,5 +40,15 @@ class PipelineSettings(BaseModel):
         default=True,
         description="Regenerate caption from VLM on each retry",
     )
+    request_timeout: float = Field(
+        default=120.0,
+        gt=0,
+        description=(
+            "Per-request timeout in seconds for generation endpoint calls "
+            "(currently the image-edit generator): a wedged/slow endpoint fails "
+            "after this instead of hanging. Also the base delay for the "
+            "exponential retry backoff (timeout, 2x, 4x, ... between retries)."
+        ),
+    )
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     evaluation: EvaluationSettings = Field(default_factory=EvaluationSettings)
