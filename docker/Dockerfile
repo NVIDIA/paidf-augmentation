@@ -120,10 +120,18 @@ RUN set -euxo pipefail; \
 
 RUN apt-get purge -y --auto-remove yasm nasm && rm -rf /var/lib/apt/lists/*
 
+# Pick the yq binary + checksum for the target arch.
+ARG TARGETARCH
 ENV YQ_VERSION=v4.52.2
-ENV YQ_BINARY=yq_linux_amd64
-ARG YQ_SHA256=6acbc0ee0ce7d457c64407acc44a9607fff065cc436433407e27e7370c51a694
+ENV YQ_BINARY=yq_linux_${TARGETARCH}
+ARG YQ_SHA256_amd64=6acbc0ee0ce7d457c64407acc44a9607fff065cc436433407e27e7370c51a694
+ARG YQ_SHA256_arm64=0cb66b6b49512ee1037487f139d0c531cfc34d532da365d417ccc21b4a715787
 RUN mkdir -p /usr/share/oss-sources && \
+    case "${TARGETARCH}" in \
+        amd64) YQ_SHA256="${YQ_SHA256_amd64}" ;; \
+        arm64) YQ_SHA256="${YQ_SHA256_arm64}" ;; \
+        *) echo "Unsupported TARGETARCH for yq: '${TARGETARCH}'" >&2; exit 1 ;; \
+    esac && \
     wget -qO /tmp/yq.tar.gz "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${YQ_BINARY}.tar.gz" && \
     echo "${YQ_SHA256}  /tmp/yq.tar.gz" | sha256sum -c - && \
     tar -xzf /tmp/yq.tar.gz && rm /tmp/yq.tar.gz && \
@@ -151,9 +159,9 @@ RUN uv python install ${PYTHON_VERSION} && \
     curl -fsSL "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz" \
         -o "/usr/share/oss-sources/Python-${PYTHON_VERSION}.tar.xz"
 
-# Patch vendored setuptools in uv's bundled Python.
-RUN /root/.local/share/uv/python/cpython-${PYTHON_VERSION}-linux-x86_64-gnu/bin/python3.13 \
-    -m pip install --no-cache-dir --break-system-packages --upgrade "setuptools>=80.9.0"
+# Upgrade setuptools in uv's Python; `uv python find` avoids a hardcoded arch path.
+RUN PYBIN="$(uv python find ${PYTHON_VERSION})" && \
+    "${PYBIN}" -m pip install --no-cache-dir --break-system-packages --upgrade "setuptools>=80.9.0"
 
 # Clone cosmos-transfer2.5 from GitHub. Tracking `main` until the next release
 # tag is cut; switch back to a `vX.Y.Z` tag for reproducibility once available.
@@ -170,7 +178,7 @@ RUN GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --branch ${COSMOS_PREDICT_VERSION}
 # cosmos_oss.checkpoints into transfer2's checkpoint_db. Predict2 uses its own
 # checkpoint_db, so shared lookups fail at download time. Patch predict2's
 # download_checkpoint to fall back to transfer2's registry.
-RUN /root/.local/share/uv/python/cpython-${PYTHON_VERSION}-linux-x86_64-gnu/bin/python3.13 -c "\
+RUN PYBIN="$(uv python find ${PYTHON_VERSION})" && "${PYBIN}" -c "\
 import pathlib; \
 p = pathlib.Path('/opt/cosmos-predict2.5/cosmos_predict2/_src/imaginaire/utils/checkpoint_db.py'); \
 t = p.read_text(); \
@@ -202,6 +210,18 @@ RUN uv venv --python ${PYTHON_VERSION}
 # override-dependencies setting is only honored when cosmos is the uv workspace
 # root, and `uv pip install -e` from /app ignores it — so we pass it explicitly.
 RUN echo 'nvidia-cudnn-cu13>=9.15.0' > /tmp/uv-overrides.txt
+
+# arm64: glcontext has no aarch64 wheel, so it builds from source and needs X11/GL/EGL headers.
+USER root
+RUN if [ "$(dpkg --print-architecture)" = "arm64" ]; then \
+        apt-get update \
+        && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            libx11-dev \
+            libgl1-mesa-dev \
+            libegl-dev \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+USER nvidia
 
 RUN uv pip install --no-cache \
     --link-mode=copy \

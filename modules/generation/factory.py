@@ -65,6 +65,7 @@ def create_generator(config, logger: logging.Logger) -> BaseGenerator:
         endpoints_dict = (
             endpoints.model_dump() if hasattr(endpoints, "model_dump") else endpoints
         )
+        request_timeout = config.pipeline.request_timeout
     else:
         aug_dict = config.get("augmentation")
         if not aug_dict:
@@ -76,6 +77,7 @@ def create_generator(config, logger: logging.Logger) -> BaseGenerator:
         local_params = aug_dict.get("local_parameters") or {}
         model_version = aug_dict["model"].get("version")
         endpoints_dict = config.get("endpoints", {})
+        request_timeout = (config.get("pipeline") or {}).get("request_timeout")
 
     if model_name == ModelNameEnum.COSMOS_TRANSFER.value:
         return _create_cosmos_transfer(
@@ -100,6 +102,7 @@ def create_generator(config, logger: logging.Logger) -> BaseGenerator:
         return _create_image_edit(
             params,
             endpoints_dict,
+            request_timeout,
             logger,
         )
     else:
@@ -235,7 +238,9 @@ def _create_cosmos_predict(
     )
 
 
-def _create_image_edit(params, endpoints_dict, logger) -> ImageEditGenerator:
+def _create_image_edit(
+    params, endpoints_dict, request_timeout, logger
+) -> ImageEditGenerator:
     image_edit_ep = endpoints_dict.get("image_edit") or {}
     endpoint = (
         os.getenv("IMAGE_EDIT_ENDPOINT_URL")
@@ -270,5 +275,6 @@ def _create_image_edit(params, endpoints_dict, logger) -> ImageEditGenerator:
         model=model or None,
         api_key=api_key,
         negative_prompt=negative_prompt,
+        timeout=request_timeout,
         logger=logger,
     )

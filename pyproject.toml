@@ -7,7 +7,7 @@ managed = true
 
 [project]
 name = "paidf-augmentation"
-version = "1.0.0"
+version = "1.0.1"
 description = "Physical AI Data Factory (PAIDF) Augmentation: a pipeline for processing camera data through generative AI models (Cosmos Transfer, Cosmos Predict, image-edit, and more)"
 readme = "README.md"
 requires-python = ">=3.10"
