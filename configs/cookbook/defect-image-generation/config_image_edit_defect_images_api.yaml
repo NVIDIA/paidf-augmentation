@@ -1,0 +1,58 @@
+data:
+  - inputs:
+      # Original tiny PCB crop — data_processing.resize upscales it for generation.
+      rgb: "/workspace/data/pcb_input.png"
+    output:
+      video: "/workspace/data/defect_images_api/output.jpg"
+      caption: "/workspace/data/defect_images_api/output.txt"
+      metadata: "/workspace/data/defect_images_api/metadata.json"
+
+endpoints:
+  - id: image_edit
+    role: image_edit
+    url: "http://localhost:8003/v1"          # base_url; SDK -> POST /v1/images/edits
+    model: "nvidia/Qwen-Image-Edit-NVPCB-OVSL2SL"
+    adapter: openai.images.edits             # client.images.edit, NOT chat.completions
+
+pipeline:
+  retry: 3
+  regenerate_caption_on_retry: false   # Static text prompt — nothing to regenerate.
+  logging:
+    enabled: true
+    level: "INFO"
+
+captioning:
+  llm:
+    text: |
+      Render this PCB component crop in the style of an NVPCB raked-solder-light
+      photograph: dark reddish board with bright orange-red and blue specular
+      highlights on the solder pads, photorealistic textures.
+
+augmentation:
+  model:
+    name: "image-edit"
+  parameters:
+    # FLAT params: the images.edits adapter promotes native SDK kwargs
+    # (size/n/response_format/...) and forwards the rest via extra_body itself.
+    # Do NOT nest under `extra_body` here (that's the chat adapter's convention).
+    num_inference_steps: 30
+    guidance_scale: 4.0
+    seed: 0
+    negative_prompt: " "
+
+data_processing:
+  preprocessing:
+    resize:
+      # Replicate chat.completions' internal normalization for ANY input size:
+      # ~1 MP (1024x1024) on a /32 grid, aspect-ratio preserved (e.g. the 158x114
+      # crop -> 1216x864). Feeds GENERATION; alignment still uses the original input.
+      target_megapixels: 1.048576   # = 1024*1024 px (the chat route's target)
+      grid: 32
+      interp: lanczos
+  alignment:
+    # POST-generation: warps the generated render back into the ORIGINAL input frame.
+    rot_range_deg: [-1.0, 1.0, 0.1]
+    shift_step: 2
+    bins: 64
+    interp: bilinear
+    no_resize: true

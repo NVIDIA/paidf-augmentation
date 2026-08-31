@@ -1,0 +1,149 @@
+data:
+  - inputs:
+      rgb: "/workspace/data/input.png"               # seed image: VLM describes it AND Veo starts from it
+    output:
+      video: "/workspace/data/out/veo_anomaly.mp4"
+      caption: "/workspace/data/out/veo_anomaly.txt"
+      metadata: "/workspace/data/out/veo_anomaly_metadata.json"
+
+endpoints:
+  # Local Qwen vLLM servers (no auth) for prompt generation + MCQ verification.
+  - id: vlm_qwen
+    role: vlm
+    url: "http://localhost:8000/v1"          # local vLLM container, no auth
+    model: "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
+  - id: llm_qwen
+    role: llm
+    url: "http://localhost:8002/v1"          # local vLLM container, no auth
+    model: "Qwen/Qwen2.5-14B-Instruct"
+  - id: veo-3.1-image2video
+    role: image2video
+    url: "https://inference-api.nvidia.com/videos"
+    model: "gcp/google/veo-3.1-generate-001"
+    adapter: openai.video.async                  # async create->poll->download
+    api_key_env: VEO_API_KEY
+    timeout: 900
+
+pipeline:
+  retry: 1
+  regenerate_caption_on_retry: false
+  logging:
+    enabled: true
+    level: "INFO"
+
+captioning:
+  # Stage 1 — VLM describes the seed image (Qwen3-VL, multimodal).
+  vlm:
+    parser: "instruct"
+    system_prompt: |
+      You are a vision-language model describing warehouse surveillance images for
+      anomaly video augmentation. Describe only what is visible in the seed image.
+      Do not invent a new camera, room, workers, or equipment.
+    user_prompt: |
+      Describe this warehouse seed image in detail for a video-generation prompt writer.
+      Describe ONLY what is visible; do not invent anything and do not describe any anomaly yet.
+      Include: camera mounting style and viewpoint (state whether wall-mounted or ceiling-mounted
+      and whether angled downward), visible warehouse zones, people, vehicles, racks, conveyors,
+      pallets, boxes, floor markings, lighting, color palette, occlusions, and empty areas where a
+      new event could plausibly happen. Output dense, factual plain-text scene notes.
+    parameters:
+      retry: 1
+      temperature: 0.1
+      top_p: 0.9
+      frequency_penalty: 0.0
+      max_tokens: 2048
+      stream: false
+      fps: 4.0
+      max_pixels: 832000
+
+  # Stage 2 — LLM writes the final image-to-video prompt (Qwen).
+  llm:
+    system_prompt: |
+      You are an expert prompt writer for realistic image-to-video anomaly augmentation.
+      You receive a VLM description of a seed warehouse image and attribute-value pairs
+      (anomaly_type, env_type). Generate one final image-to-video prompt that makes the
+      requested warehouse anomaly obvious while preserving the seed image. Order the prompt:
+      [Cinematography] + [Seed Preservation] + [Subject] + [Action] + [Context] + [Style & Ambiance] + [Negative Constraints]
+      Requirements:
+      - Keep the environment a warehouse; use the provided image as the seed reference frame.
+      - Preserve the exact camera angle, position, field of view, layout, lighting, object
+        locations, color palette, and background for the entire clip. Camera locked off: no
+        pan, tilt, zoom, dolly, tracking, handheld motion, cuts, or time-lapse.
+      - Keep all existing racks, machinery, pallets, boxes, workers, vehicles, and floor
+        markings persistent; nothing appears, disappears, teleports, morphs, or changes scale.
+      - Add only the minimum new human motion needed for the anomaly; make it explicit and
+        physically plausible. Use realistic warehouse workers, PPE, forklifts, industrial
+        lighting, and CCTV compression. Plain visual language, no metaphors.
+      - No gore, severe injury detail, text/UI overlays, fisheye, vignette, bokeh, shallow
+        depth of field, lens flare, slow motion, or stylized film damage.
+      - Output only a JSON object with one key "prompt".
+    example_prompt: |
+      Use the provided image as the seed reference frame. Fixed wall-mounted warehouse CCTV
+      camera angled downward from the same position, preserving the exact field of view, racks,
+      pallets, boxes, floor markings, lighting, and background objects for the entire clip. A
+      warehouse worker in a high-visibility vest slips on a small liquid spill in the aisle and
+      falls to the concrete floor while nearby workers and equipment remain in their original
+      locations. Washed-out compressed security camera image quality, flat overhead industrial
+      lighting, deep depth of field, realistic physics, no camera movement, no cuts, no object
+      popping, no disappearing objects, no cinematic effects.
+    parameters:
+      retry: 1
+      temperature: 0.2
+      top_p: 0.95
+      max_tokens: 1024
+      frequency_penalty: 0.0
+      presence_penalty: 0.0
+      stream: false
+    # Attribute-value pairs the LLM turns into the anomaly. MUST be under `llm`.
+    variables:
+      anomaly_type: ["person_falling"]
+      env_type: ["warehouse"]
+    # Verification reuses the SAME `variables` above — no verification_values and no
+    # verification_options. The MCQ generator writes one question per variable and the
+    # LLM INVENTS the distractor options itself (question_generation.generate_options
+    # below); only the correct answer is pinned to the variable's value. So changing
+    # the anomaly is a ONE-LINE edit (variables.anomaly_type) — no option lists to type.
+
+augmentation:
+  model:
+    name: "veo-3.1-image2video"                  # resolves to the endpoint id above
+    version: "3.1"
+  parameters:
+    seconds: 8
+    size: "1280x720"
+    seed: 42
+
+evaluators:
+  - attribute_verification:
+      enabled: true
+      question_generation:
+        endpoint_id: llm_qwen
+        generate_options: true                   # LLM invents the distractors itself
+        system_prompt: |
+          You write ONE simple multiple-choice question that checks whether a
+          generated warehouse-anomaly video contains the requested attribute.
+          The question must be easy for a VLM to answer from video frames, name
+          the attribute explicitly, include the correct value plus 2-3 plausible
+          but clearly-wrong distractors you invent, and mark the correct option.
+          Output only JSON:
+          {"variable","value","question","options":{"A","B",...},"correct_answer"}.
+        parameters:
+          retry: 1
+          temperature: 0.1
+          top_p: 0.95
+          max_tokens: 1024
+          stream: false
+      vlm_verification:
+        endpoint_id: vlm_qwen
+        frames: 6                                # sample 6 frames across the clip
+        system_prompt: |
+          You are a strict VLM verifier for generated warehouse-anomaly videos.
+          You are shown ordered frames from one clip. Answer each multiple-choice
+          question about what is visible across those frames with the single best
+          option letter only (A, B, C, or D). Do not explain.
+        parameters:
+          retry: 1
+          temperature: 0.0
+          top_p: 1.0
+          max_tokens: 10
+          stream: false

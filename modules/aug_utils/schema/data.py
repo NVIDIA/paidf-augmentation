@@ -5,7 +5,7 @@
 
 from typing import Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ControlInputs(BaseModel):
@@ -21,6 +21,24 @@ class ControlInputs(BaseModel):
     )
 
 
+class PromptAttributes(BaseModel):
+    """Selected deterministic prompt attributes for one sample."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_type: str = Field(description="Selected event type ID")
+    motion_level: str = Field(description="Selected motion level ID")
+    aftermath: str = Field(description="Selected aftermath ID")
+
+    @field_validator("event_type", "motion_level", "aftermath")
+    @classmethod
+    def _strip_non_empty_selection(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("prompt attribute selections must not be empty")
+        return value
+
+
 class DataInputs(BaseModel):
     """Input specification for a single data sample."""
 
@@ -31,6 +49,13 @@ class DataInputs(BaseModel):
     controls: Optional[ControlInputs] = Field(
         default=None,
         description="Control modality inputs (only for Cosmos Transfer 2.5)",
+    )
+    prompt_attributes: Optional[PromptAttributes] = Field(
+        default=None,
+        description=(
+            "Per-sample event_type, motion_level, and aftermath IDs selected "
+            "from captioning.template.attributes"
+        ),
     )
 
 

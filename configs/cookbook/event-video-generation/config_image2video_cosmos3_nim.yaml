@@ -1,0 +1,167 @@
+data:
+  - inputs:
+      rgb: "/workspace/data/warehouse_test.png"               # your seed image (mount into ./data; not shipped): VLM describes it AND Cosmos3 starts from it
+    output:
+      video: "/workspace/data/out/cosmos3_nim_anomaly.mp4"
+      caption: "/workspace/data/out/cosmos3_nim_anomaly.txt"
+      metadata: "/workspace/data/out/cosmos3_nim_anomaly_metadata.json"
+
+endpoints:
+  # Local Qwen vLLM servers (no auth) for prompt generation + MCQ verification.
+  - id: vlm_qwen
+    role: vlm
+    url: "http://localhost:8000/v1"          # local vLLM container, no auth
+    model: "Qwen/Qwen3.6-27B-FP8"            # currently-served model on :8000 (was Qwen3-VL-30B, now retired)
+  - id: llm_qwen
+    role: llm
+    url: "http://localhost:8002/v1"          # local vLLM container, no auth
+    model: "Qwen/Qwen2.5-14B-Instruct"
+  # Cosmos3 generator NIM (nvstaging/nim/cosmos3) deployed on GPU5.
+  # This NIM speaks the Visual-GenAI REST contract POST /v1/infer (Cosmos3Request),
+  # NOT the OpenAI /v1/videos/sync route — so use the `nim` adapter, not
+  # `openai.video.sync`. The Cosmos3Request schema FORBIDS extra fields, so this
+  # endpoint MUST NOT set `model:` (the nim adapter would inject it -> HTTP 422
+  # "model: Extra inputs are not permitted").
+  - id: cosmos3-image2video
+    role: image2video
+    url: "http://localhost:8007"             # container binds 0.0.0.0:8000 -> host 8007
+    adapter: nim
+    timeout: 900                             # generation is minutes; allow headroom
+
+pipeline:
+  retry: 1                                     # re-roll the seed once if the evaluator fails
+  regenerate_caption_on_retry: false
+  logging:
+    enabled: true
+    level: "INFO"
+
+captioning:
+  # Stage 1 — VLM describes the seed image (multimodal Qwen).
+  vlm:
+    parser: "instruct"
+    system_prompt: |
+      You are a vision-language model describing warehouse surveillance images for
+      anomaly video augmentation. Describe only what is visible in the seed image.
+      Do not invent a new camera, room, workers, or equipment.
+    user_prompt: |
+      Describe this warehouse seed image in detail for a video-generation prompt writer.
+      Describe ONLY what is visible; do not invent anything and do not describe any anomaly yet.
+      Include: camera mounting style and viewpoint (state whether wall-mounted or ceiling-mounted
+      and whether angled downward), visible warehouse zones, people, vehicles, racks, conveyors,
+      pallets, boxes, floor markings, lighting, color palette, occlusions, and empty areas where a
+      new event could plausibly happen. Output dense, factual plain-text scene notes.
+    parameters:
+      retry: 1
+      temperature: 0.1
+      top_p: 0.9
+      frequency_penalty: 0.0
+      max_tokens: 2048
+      stream: false
+      fps: 4.0
+      max_pixels: 832000
+
+  # Stage 2 — LLM writes the final image-to-video prompt (Qwen2.5). For Cosmos3
+  # image2video the first frame already fixes the scene appearance, so the seed
+  # preservation + minimal-new-motion framing below applies the same way as Veo.
+  llm:
+    system_prompt: |
+      You are an expert prompt writer for realistic image-to-video anomaly augmentation.
+      You receive a VLM description of a seed warehouse image and attribute-value pairs
+      (anomaly_type, env_type). Generate one final image-to-video prompt that makes the
+      requested warehouse anomaly obvious while preserving the seed image. Order the prompt:
+      [Cinematography] + [Seed Preservation] + [Subject] + [Action] + [Context] + [Style & Ambiance] + [Negative Constraints]
+      Requirements:
+      - Keep the environment a warehouse; use the provided image as the seed reference frame.
+      - Preserve the exact camera angle, position, field of view, layout, lighting, object
+        locations, color palette, and background for the entire clip. Camera locked off: no
+        pan, tilt, zoom, dolly, tracking, handheld motion, cuts, or time-lapse.
+      - Keep all existing racks, machinery, pallets, boxes, workers, vehicles, and floor
+        markings persistent; nothing appears, disappears, teleports, morphs, or changes scale.
+      - Add only the minimum new human motion needed for the anomaly; make it explicit and
+        physically plausible. Use realistic warehouse workers, PPE, forklifts, industrial
+        lighting, and CCTV compression. Plain visual language, no metaphors.
+      - Pace the anomaly so it is clearly followable: build it as a natural three-beat
+        sequence (a visible setup or trigger, the main event, then a settle) that unfolds
+        across several frames rather than in a single instant. For person_falling, show the
+        adult walking normally, one foot catching or sliding, the torso pitching off balance,
+        arms reaching out, knees bending, and the body dropping to a side-seated or
+        hip-and-hand recovery pose; the fall must read gradually, not as an abrupt snap or a
+        deliberate kneel.
+      - No gore, severe injury detail, text/UI overlays, fisheye, vignette, bokeh, shallow
+        depth of field, lens flare, slow motion, or stylized film damage.
+      - Output only a JSON object with one key "prompt".
+    example_prompt: |
+      Use the provided image as the seed reference frame. Fixed wall-mounted warehouse CCTV
+      camera angled downward from the same position, preserving the exact field of view, racks,
+      pallets, boxes, floor markings, lighting, and background objects for the entire clip. A
+      warehouse worker in a high-visibility vest slips on a small liquid spill in the aisle and
+      falls to the concrete floor while nearby workers and equipment remain in their original
+      locations. Washed-out compressed security camera image quality, flat overhead industrial
+      lighting, deep depth of field, realistic physics, no camera movement, no cuts, no object
+      popping, no disappearing objects, no cinematic effects.
+    parameters:
+      retry: 1
+      temperature: 0.2
+      top_p: 0.95
+      max_tokens: 1024
+      frequency_penalty: 0.0
+      presence_penalty: 0.0
+      stream: false
+    # Attribute-value pairs the LLM turns into the anomaly. MUST be under `llm`.
+    variables:
+      anomaly_type: ["person_falling"]
+      env_type: ["warehouse"]
+
+augmentation:
+  model:
+    name: "cosmos3-image2video"                # resolves to the endpoint id above
+
+  parameters:
+    # BYOM pass-through: forwarded VERBATIM into the /v1/infer body. Because the
+    # Cosmos3Request schema forbids unknown fields, every key here MUST be an
+    # actual Cosmos3Request field. (This is why the OpenAI-style `size` /
+    # `num_frames` / `num_inference_steps` / `extra_params` names from the
+    # openai.video.sync config are NOT used here.)
+    negative_prompt: ""
+    resolution: "720_16_9"                     # enum tier_aspect; HD 16:9
+    num_output_frames: 93                      # MUST be 4k+1 (25,29,...,93,...,397)
+    fps: 24                                    # Cosmos3 native fps
+    steps: 35                                  # denoising steps (Cosmos3Request `steps`)
+    guidance_scale: 6.0
+    flow_shift: 10.0
+    seed: 42
+
+evaluators:
+  - attribute_verification:
+      enabled: true
+      question_generation:
+        endpoint_id: llm_qwen
+        generate_options: true                   # LLM invents the distractors itself
+        system_prompt: |
+          You write ONE simple multiple-choice question that checks whether a
+          generated warehouse-anomaly video contains the requested attribute.
+          The question must be easy for a VLM to answer from video frames, name
+          the attribute explicitly, include the correct value plus 2-3 plausible
+          but clearly-wrong distractors you invent, and mark the correct option.
+          Output only JSON:
+          {"variable","value","question","options":{"A","B",...},"correct_answer"}.
+        parameters:
+          retry: 1
+          temperature: 0.1
+          top_p: 0.95
+          max_tokens: 1024
+          stream: false
+      vlm_verification:
+        endpoint_id: vlm_qwen
+        frames: 6                                # sample 6 frames across the clip
+        system_prompt: |
+          You are a strict VLM verifier for generated warehouse-anomaly videos.
+          You are shown ordered frames from one clip. Answer each multiple-choice
+          question about what is visible across those frames with the single best
+          option letter only (A, B, C, or D). Do not explain.
+        parameters:
+          retry: 1
+          temperature: 0.0
+          top_p: 1.0
+          max_tokens: 10
+          stream: false

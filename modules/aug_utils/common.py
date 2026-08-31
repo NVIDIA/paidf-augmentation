@@ -1,16 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import io
 import logging
 import os
 import re
-import sys
-from contextlib import contextmanager
-from pathlib import Path
 from typing import Any, Dict, List, Union
 
-import yaml
 from pydantic import ValidationError
 
 from .constants import MEDIA_EXTENSIONS, is_media
@@ -24,76 +19,6 @@ def is_remote_path(path: str) -> bool:
     return str(path).startswith(
         ("s3://", "msc://", "gs://", "az://", "http://", "https://")
     )
-
-
-class PrintCaptureHandler(logging.StreamHandler):
-    """A custom stream handler that forwards captured output to a logger."""
-
-    def __init__(self, logger):
-        super().__init__()
-        self.logger = logger
-
-    def emit(self, record):
-        # Forward only if target logger differs from this handler's owner
-        if record.name != self.logger.name:
-            self.logger.info(self.format(record))
-        else:
-            super().emit(record)  # fall back to normal stream handling
-
-
-@contextmanager
-def capture_prints(logger):
-    """Capture print statements and redirect them to a logger while still printing to terminal.
-
-    Args:
-        logger: The logger instance to send captured print statements to.
-
-    Example:
-        logger = logging.getLogger(__name__)
-        with capture_prints(logger):
-            print("This will be both printed and logged")
-    """
-    old_stdout = sys.stdout
-    new_stdout = io.StringIO()
-
-    # Track if we're currently in a logging operation to prevent recursion
-    _capturing = False
-
-    class TeeStdout:
-        def write(self, data):
-            nonlocal _capturing
-            new_stdout.write(data)
-            # Only log non-empty lines, and prevent recursion
-            if data.strip() and not _capturing:
-                try:
-                    _capturing = True
-                    print(f"Capturing print: {data.strip()}")
-                    logger.info(data.strip())
-                finally:
-                    _capturing = False
-
-        def flush(self):
-            new_stdout.flush()
-            old_stdout.flush()
-
-    sys.stdout = TeeStdout()
-    try:
-        yield new_stdout
-    finally:
-        sys.stdout = old_stdout
-
-
-def is_template_format(text: str) -> bool:
-    """
-    Check if text contains template placeholders like {variable}.
-
-    Args:
-        text: Text to check
-
-    Returns:
-        bool: True if text contains {variable} patterns
-    """
-    return bool(re.search(r"\{[a-zA-Z_][a-zA-Z0-9_]*\}", text))
 
 
 def replace_words(
@@ -149,181 +74,6 @@ def replace_words(
                 result = re.sub(pattern, f"{{{category}}}", result, flags=re.IGNORECASE)
 
     return result
-
-
-# YAML Configuration Utilities
-def read_yaml_config(yaml_file_path: str) -> Dict[str, Any]:
-    """
-    Read and parse a YAML configuration file.
-
-    Args:
-        yaml_file_path (str): Path to the YAML configuration file
-
-    Returns:
-        Dict[str, Any]: Parsed YAML configuration
-
-    Raises:
-        FileNotFoundError: If the YAML file doesn't exist
-        yaml.YAMLError: If the YAML file is malformed
-    """
-    if not Path(yaml_file_path).exists():
-        raise FileNotFoundError(f"YAML file not found: {yaml_file_path}")
-
-    with open(yaml_file_path, "r") as f:
-        return yaml.safe_load(f)
-
-
-def get_output_dir_from_config(config: Dict[str, Any]) -> str:
-    """
-    Extract the output_dir parameter from Isaac Sim Replicator configuration.
-
-    Args:
-        config (Dict[str, Any]): Parsed YAML configuration
-
-    Returns:
-        str: The output directory path
-
-    Raises:
-        KeyError: If the output_dir parameter is not found
-    """
-    try:
-        return config["isaacsim.replicator.agent"]["replicator"]["parameters"][
-            "output_dir"
-        ]
-    except KeyError as e:
-        raise KeyError(
-            f"Could not find 'output_dir' parameter in configuration. Missing key: {e}"
-        )
-
-
-def get_output_dir_from_yaml_file(yaml_file_path: str) -> str:
-    """
-    Read the output_dir parameter directly from a YAML file.
-
-    Args:
-        yaml_file_path (str): Path to the YAML configuration file
-
-    Returns:
-        str: The output directory path
-
-    Raises:
-        FileNotFoundError: If the YAML file doesn't exist
-        KeyError: If the output_dir parameter is not found
-        yaml.YAMLError: If the YAML file is malformed
-    """
-    config = read_yaml_config(yaml_file_path)
-    return get_output_dir_from_config(config)
-
-
-def get_replicator_parameters(config: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Extract all replicator parameters from Isaac Sim Replicator configuration.
-
-    Args:
-        config (Dict[str, Any]): Parsed YAML configuration
-
-    Returns:
-        Dict[str, Any]: All replicator parameters
-
-    Raises:
-        KeyError: If the replicator parameters section is not found
-    """
-    try:
-        return config["isaacsim"]["replicator"]["agent"]["replicator"]["parameters"]
-    except KeyError as e:
-        raise KeyError(
-            f"Could not find replicator parameters in configuration. Missing key: {e}"
-        )
-
-
-def validate_output_dir(output_dir: str, create_if_missing: bool = False) -> bool:
-    """
-    Validate that an output directory exists and optionally create it.
-
-    Args:
-        output_dir (str): Path to the output directory
-        create_if_missing (bool): Whether to create the directory if it doesn't exist
-
-    Returns:
-        bool: True if directory exists or was created successfully, False otherwise
-    """
-    output_path = Path(output_dir)
-
-    if output_path.exists():
-        return True
-
-    if create_if_missing:
-        try:
-            output_path.mkdir(parents=True, exist_ok=True)
-            return True
-        except Exception:
-            return False
-
-    return False
-
-
-def cleanup_oauth_token_file(
-    token_file_path: str = "augmentation_steps/captioning/py_llm_oauth_token.json",
-) -> bool:
-    """
-    Remove the OAuth token file for security purposes.
-
-    Args:
-        token_file_path (str): Path to the OAuth token file to remove
-
-    Returns:
-        bool: True if file was removed or didn't exist, False if removal failed
-    """
-    try:
-        token_path = Path(token_file_path)
-        if token_path.exists():
-            token_path.unlink()
-            print(f"Removed OAuth token file: {token_file_path}")
-            return True
-        else:
-            # File doesn't exist, which is fine
-            return True
-    except Exception as e:
-        # Log the error but don't fail the entire process
-        print(f"Warning: Could not remove OAuth token file {token_file_path}: {e}")
-        return False
-
-
-def cleanup_sensitive_files(base_dir: str = ".") -> None:
-    """
-    Clean up sensitive files before execution.
-
-    Args:
-        base_dir (str): Base directory to search for sensitive files
-    """
-    sensitive_files = [
-        "augmentation_steps/captioning/py_llm_oauth_token.json",
-        "*.key",
-        "*.pem",
-        "*.p12",
-        "*.pfx",
-        "credentials.json",
-        "token.json",
-    ]
-
-    base_path = Path(base_dir)
-
-    for pattern in sensitive_files:
-        try:
-            if "*" in pattern:
-                # Handle glob patterns
-                for file_path in base_path.glob(pattern):
-                    if file_path.is_file():
-                        file_path.unlink()
-                        print(f"Removed sensitive file: {file_path}")
-            else:
-                # Handle specific file paths
-                file_path = base_path / pattern
-                if file_path.exists() and file_path.is_file():
-                    file_path.unlink()
-                    print(f"Removed sensitive file: {file_path}")
-        except Exception as e:
-            print(f"Warning: Could not remove sensitive file {pattern}: {e}")
 
 
 # Type Validation and Casting Functions
@@ -395,6 +145,57 @@ def validate_and_cast_config_params(
     return validated_params
 
 
+# Field/override-path names whose *values* are secrets and must never be logged.
+# ``*_env`` is excluded: it names an env var, not the key itself.
+_SECRET_FIELD_RE = re.compile(
+    r"(api_?key|token|secret|password|passwd|credential)", re.IGNORECASE
+)
+
+
+def _is_secret_field(name: str) -> bool:
+    name = (name or "").lower()
+    if not name or name.endswith("_env"):
+        return False
+    return bool(_SECRET_FIELD_RE.search(name))
+
+
+def redact_overrides(overrides: List[str]) -> List[str]:
+    """Mask the value of any secret-like dotlist override (e.g. ``x.api_key=sk-…``)
+    so secrets can't leak into logs or a process-arg dump. Others pass through."""
+    out: List[str] = []
+    for item in overrides:
+        key, sep, _value = item.partition("=")
+        if sep and _is_secret_field(key.rsplit(".", 1)[-1]):
+            out.append(f"{key}=***")
+        else:
+            out.append(item)
+    return out
+
+
+def format_validation_error(exc: ValidationError) -> str:
+    """Render a Pydantic ``ValidationError`` without echoing secret input values.
+
+    Pydantic's default string form embeds each error's ``input`` verbatim, which
+    can dump a secret straight into the log. Show ``loc``/``msg``/``type`` always,
+    and the input only for a non-secret *scalar* field (complex inputs may nest a
+    secret elsewhere, so they're omitted)."""
+    lines: List[str] = []
+    for err in exc.errors():
+        loc_parts = [str(x) for x in err.get("loc", ())]
+        loc = ".".join(loc_parts) or "<root>"
+        field = loc_parts[-1] if loc_parts else ""
+        line = f"  {loc}: {err.get('msg')} [{err.get('type')}]"
+        value = err.get("input")
+        if (
+            "input" in err
+            and not _is_secret_field(field)
+            and isinstance(value, (str, int, float, bool))
+        ):
+            line += f" (input={value!r})"
+        lines.append(line)
+    return "\n".join(lines) or str(exc)
+
+
 # Configuration Validation Functions
 def validate_config_structure(config: dict, logger: logging.Logger):
     """Validate configuration against the unified Pydantic schema.
@@ -411,7 +212,9 @@ def validate_config_structure(config: dict, logger: logging.Logger):
         logger.info("Configuration structure validation passed")
         return pipeline_config
     except ValidationError as exc:
-        logger.error(f"Configuration validation failed:\n{exc}")
+        logger.error(
+            "Configuration validation failed:\n%s", format_validation_error(exc)
+        )
         return None
 
 

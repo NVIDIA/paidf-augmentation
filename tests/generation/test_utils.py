@@ -16,10 +16,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from generation.utils import (
+    decode_failure_hint,
     pix_fmt_is_decodable,
     probe_video_format,
+    sniff_container,
     video_format_unsupported,
 )
+
+# Leading bytes of each container, enough for the signature check.
+WEBM_HEAD = b"\x1a\x45\xdf\xa3\x01\x00\x00\x00"
+MP4_HEAD = b"\x00\x00\x00\x20ftypisom\x00\x00\x02\x00"
 
 
 def _fake_ffprobe(streams):
@@ -214,3 +220,64 @@ class TestProbeVideoFormat:
         result = MagicMock(stdout="{", returncode=1)
         with patch.object(subprocess, "run", return_value=result):
             assert probe_video_format("/data/in.mp4") == {}
+
+
+# ---------------------------------------------------------------------------
+# sniff_container / decode_failure_hint
+# ---------------------------------------------------------------------------
+
+
+class TestSniffContainer:
+    def test_identifies_webm_regardless_of_extension(self, tmp_path):
+        # The endpoint's bytes are written to the configured output path, so a
+        # WebM payload routinely arrives named ".mp4" -- the extension lies.
+        path = tmp_path / "out.mp4"
+        path.write_bytes(WEBM_HEAD)
+        assert sniff_container(str(path)) == "Matroska/WebM"
+
+    def test_identifies_mp4(self, tmp_path):
+        path = tmp_path / "out.mp4"
+        path.write_bytes(MP4_HEAD)
+        assert sniff_container(str(path)) == "MP4/MOV"
+
+    def test_unrecognized_bytes_return_none(self, tmp_path):
+        path = tmp_path / "out.mp4"
+        path.write_bytes(b"not a media file")
+        assert sniff_container(str(path)) is None
+
+    def test_missing_file_returns_none(self):
+        assert sniff_container("/nonexistent/out.mp4") is None
+
+
+class TestDecodeFailureHint:
+    def test_cuvid_failure_points_at_the_missing_gpu(self, tmp_path):
+        path = tmp_path / "out.mp4"
+        path.write_bytes(MP4_HEAD)
+        hint = decode_failure_hint("Cannot load libnvcuvid.so.1", str(path))
+        assert hint is not None
+        assert "--gpus" in hint
+
+    def test_webm_gets_a_container_hint_not_a_gpu_one(self, tmp_path):
+        # The real failure text for a WebM input; on its own it reads as a
+        # corrupt file, which is what sent people looking in the wrong place.
+        path = tmp_path / "out.mp4"
+        path.write_bytes(WEBM_HEAD)
+        hint = decode_failure_hint(
+            "Invalid data found when processing input", str(path)
+        )
+        assert hint is not None
+        assert "Matroska/WebM" in hint
+        assert "--gpus" not in hint
+
+    def test_readable_container_gets_no_hint(self, tmp_path):
+        # A genuine decode failure on a supported container must not be
+        # explained away as a build limitation.
+        path = tmp_path / "out.mp4"
+        path.write_bytes(MP4_HEAD)
+        assert decode_failure_hint("some other ffmpeg error", str(path)) is None
+
+    def test_cuvid_hint_does_not_need_the_file(self):
+        assert decode_failure_hint("h264_cuvid: Failed loading nvcuvid") is not None
+
+    def test_no_path_and_no_known_marker_yields_no_hint(self):
+        assert decode_failure_hint("Invalid data found when processing input") is None

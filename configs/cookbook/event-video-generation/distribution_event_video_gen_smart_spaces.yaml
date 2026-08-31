@@ -1,0 +1,48 @@
+# Template workflow for generating multiple Cosmos 3 Super image-to-video
+# anomaly clips from seed images.
+#
+# This workflow is consumed by:
+#   python modules/config_distribution_generation/generate_augmentation_configs.py \
+#     --workflow configs/cookbook/event-video-generation/distribution_event_video_gen_smart_spaces.yaml
+#
+# Put one seed image in data_dir to generate N clips from one seed image, or put
+# multiple seed images in data_dir to generate N clips per seed image.
+
+workflow_type: event_video_gen_i2v
+schema_version: 1
+
+# Directory containing seed/reference images mounted into the augmentation
+# container or visible from the Lepton job. Supported media files are discovered
+# recursively.
+data_dir: "/path/to/seed_images"
+
+# Number of generated runtime configs per seed image.
+n_augmentations: 5
+
+# Base runtime config copied for every generated video config.
+example_augmentation_config: "config_event_video_gen_cosmos3_smart_spaces.yaml"
+
+# Where generated per-video runtime configs should be written.
+config_output: "/path/to/generated_configs/event_video_gen"
+
+# Where generated videos/captions/metadata/evaluation JSON should be written by
+# the runtime configs. For Cosmos 3 Super Image2Video, generated output paths
+# resolve to:
+#   {output_root}/{seed_stem}/aug_0/output.mp4
+#   {output_root}/{seed_stem}/aug_0/output_prompt.txt
+#   {output_root}/{seed_stem}/aug_0/output_metadata.json
+#   {output_root}/{seed_stem}/aug_0/output.mp4_evaluation.json
+output_root: "/path/to/event_video_outputs"
+
+# Values copied into captioning.llm.variables in each generated runtime config.
+# Use one value for a fixed anomaly type, or multiple weighted values to sample
+# different anomaly types across generated configs.
+variables:
+  anomaly_type:
+    person_falling: 1.0
+
+# Alternative examples:
+# variables:
+#   anomaly_type:
+#     person_falling: 0.5
+#     fire_or_smoke: 0.5

@@ -1,0 +1,47 @@
+data:
+  - inputs:
+      rgb: "/workspace/data/pcb_nim.png"   # mounted from ./data
+    output:
+      video: "/workspace/data/out/pcb_nim_edit.jpg"                        # mounted writable from ./data/out
+      caption: "/workspace/data/out/pcb_nim_edit.txt"
+      metadata: "/workspace/data/out/pcb_nim_edit_metadata.json"
+
+endpoints:
+  - id: image_edit_nim
+    role: image_edit
+    url: "http://localhost:8006"             # nim-nvpcb NIM on GPU 6; container uses --network host
+    adapter: nim                             # POST /v1/infer (role default is also nim); local, no auth
+
+pipeline:
+  retry: 1
+  regenerate_caption_on_retry: false         # static text prompt — nothing to regenerate
+  logging:
+    enabled: true
+    level: "INFO"
+
+captioning:
+  llm:
+    # Static text captioner (no variables, no LLM endpoint needed) — the PCB
+    # render instruction, same as config_image_edit_defect_chat_api.yaml.
+    text: |
+      Render this PCB component crop in the style of an NVPCB raked-solder-light
+      photograph: dark reddish board with bright orange-red and blue specular
+      highlights on the solder pads, photorealistic textures.
+
+augmentation:
+  model:
+    name: "image-edit"
+  parameters:
+    steps: 30
+    cfg_scale: 4.0
+    seed: 42
+    negative_prompt: " "
+
+data_processing:
+  alignment:
+    # POST-generation: warps the generated render back into the ORIGINAL input frame.
+    rot_range_deg: [-1.0, 1.0, 0.1]
+    shift_step: 2
+    bins: 64
+    interp: bilinear
+    no_resize: true

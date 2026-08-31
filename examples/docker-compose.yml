@@ -1,39 +1,55 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Convenience wrapper around the CLI. Endpoint URLs and model names come from
+# the config's `endpoints:` list, so nothing about the backend is set here.
+# Service names keep the paidf- prefix to match the image.
+#
+#   docker compose -f examples/docker-compose.yml run --rm paidf-augmentation-gpu \
+#     --config configs/cookbook/video-data-augmentation/config_video_transfer_CT25_nim.yaml
+#
+# Extra CLI arguments (OmegaConf overrides) can be appended to that command.
+
 services:
   paidf-augmentation:
-    image: paidf-augmentation:latest
+    image: paidf-augmentation:1.1.0
     build:
       context: ..
       dockerfile: docker/Dockerfile
+    # Needed only to reach model endpoints on the host's localhost. Drop it when
+    # every endpoint is a remote URL.
     network_mode: host
-    runtime: nvidia
+    working_dir: /workspace
     environment:
-      NVIDIA_VISIBLE_DEVICES: all
-      NVIDIA_DRIVER_CAPABILITIES: compute,utility
-      OMNI_STORAGE_ENABLED: "${OMNI_STORAGE_ENABLED:-0}"
-      OMNI_STORAGE_HOST: "${OMNI_STORAGE_HOST:-127.0.0.1}"
-      OMNI_STORAGE_PORT: "${OMNI_STORAGE_PORT:-50002}"
-      VLM_ENDPOINT_URL: "${VLM_ENDPOINT_URL:-http://localhost:9001/v1}"
-      VLM_ENDPOINT_MODEL: "${VLM_ENDPOINT_MODEL:-nvidia/cosmos-reason1-7b}"
-      VLM_VERIFICATION_ENDPOINT_URL: "${VLM_VERIFICATION_ENDPOINT_URL:-http://localhost:9001/v1}"
-      VLM_VERIFICATION_ENDPOINT_MODEL: "${VLM_VERIFICATION_ENDPOINT_MODEL:-nvidia/cosmos-reason1-7b}"
-      COSMOS_ENDPOINT_URL: "${COSMOS_ENDPOINT_URL:-http://localhost:30002/}"
-      COSMOS_ENDPOINT_MODEL: "${COSMOS_ENDPOINT_MODEL:-nvidia/Cosmos-Transfer1-7B}"
-      LLM_ENDPOINT_URL: "${LLM_ENDPOINT_URL:-https://integrate.api.nvidia.com/v1}"
-      LLM_ENDPOINT_MODEL: "${LLM_ENDPOINT_MODEL:-nvidia/llama-3.3-nemotron-super-49b-v1}"
-      LLM_VERIFICATION_ENDPOINT_URL: "${LLM_VERIFICATION_ENDPOINT_URL:-https://integrate.api.nvidia.com/v1}"
-      LLM_VERIFICATION_ENDPOINT_MODEL: "${LLM_VERIFICATION_ENDPOINT_MODEL:-nvidia/llama-3.3-nemotron-super-49b-v1}"
-      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      # API keys are read from the host environment; each endpoint names the
+      # variable it wants via `api_key_env`. Unset variables resolve to no key,
+      # which is correct for local, unauthenticated servers.
       VLM_API_KEY: "${VLM_API_KEY:-}"
       LLM_API_KEY: "${LLM_API_KEY:-}"
+      BUILD_NVIDIA_API_KEY: "${BUILD_NVIDIA_API_KEY:-}"
+      NVIDIA_API_KEY: "${NVIDIA_API_KEY:-}"
+      VEO_API_KEY: "${VEO_API_KEY:-}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
     volumes:
-      - ../modules:/app/modules
-      - ../configs:/app/configs
-      - ../data:/app/data
-      # Mount secrets.json for MSC storage configuration
-      - ./secrets.json:/var/secrets/secrets.json:ro
-    entrypoint: ["/bin/bash"]
-    tty: true
-    stdin_open: true
+      - ../configs:/workspace/configs
+      - ../data:/workspace/data
+      # Cloud storage (multi-storage-client) only — create examples/secrets.json
+      # first, or Docker will create a directory in its place.
+      # - ./secrets.json:/var/secrets/secrets.json:ro
+
+  # Use this service for the CT2.5 example above, evaluators or
+  # data_processing.transcode over H.264 input (hardware h264_cuvid decode
+  # only; no software AVC fallback), or the cupy-based
+  # data_processing.alignment post-processor. Pick a GPU that is not already
+  # saturated by a co-located model server.
+  paidf-augmentation-gpu:
+    extends:
+      service: paidf-augmentation
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["3"]
+              capabilities: [gpu, video]

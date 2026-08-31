@@ -39,3 +39,6 @@ data/*
 htmlcov/
 # Sample input for starter config
 !data/sample_input.mp4
+
+docs/testing/
+docs/TESTING.md

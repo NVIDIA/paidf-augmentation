@@ -1,0 +1,80 @@
+# Template workflow for generating multiple Cosmos 3 Super text-to-image
+# Smart Spaces seed images from one environment request.
+#
+# This workflow is intended for a seed-image distribution generator. It expands
+# one environment type/description into N normal runtime configs based on:
+#   configs/cookbook/event-video-generation/config_seed_image_gen_cosmos3_super_t2i_smart_spaces.yaml
+#
+# Minimal user inputs:
+#   1. env_type
+#   2. n_augmentations
+#   3. optional env_description
+#
+# This T2I workflow is environment-driven. The distribution generator maps
+# env_type/env_description into captioning.llm.variables and creates one output
+# image config per augmentation.
+
+workflow_type: seed_image_gen_t2i
+schema_version: 1
+
+# User input: broad environment type. Examples:
+# retail store, warehouse, hospital, school, airport, office, factory,
+# convenience store, pharmacy, lobby, parking garage
+env_type: "retail store"
+
+# User input: optional natural-language details for the target environment.
+# Keep this specific enough for the prompt expansion LLM to place relevant
+# objects, layout, people, lighting, and background context.
+env_description: "retail store aisle with shelves, product displays, checkout-adjacent area, refrigerators, entrance or exit door, polished floor, ceiling lights, and 2-3 adult shoppers. Use a fixed lower wall-mounted corner or upper-wall camera viewpoint about 2.2 to 2.7 meters above the floor, tilted downward around 25 to 35 degrees. Use a close medium-wide crop so people occupy about 65-75% of visual attention while shelves, floor, doors, counters, bags, baskets, pockets, and nearby small retail objects remain large and readable. Do not use a distant CCTV overview, ceiling-mounted viewpoint, top-down view, bird's-eye view, or extreme wide shot."
+
+# User input: number of unique seed images to generate for this environment.
+n_augmentations: 5
+
+# Base runtime config copied for every generated seed-image config.
+example_augmentation_config: "config_seed_image_gen_cosmos3_super_t2i_smart_spaces.yaml"
+
+# Where generated per-image runtime configs should be written.
+config_output: "/path/to/generated_configs/seed_image_gen_t2i"
+
+# Where generated seed images/captions/metadata should be written.
+output_root: "/path/to/generated_seed_images"
+
+# Output basename used when the generator creates unique files:
+#   {output_root}/{env_type}/aug_0/seed_image.png
+#   {output_root}/{env_type}/aug_0/seed_image_prompt.txt
+#   {output_root}/{env_type}/aug_0/seed_image_metadata.json
+output_basename: "seed_image"
+
+# Deterministic seed control. Each generated config should use:
+#   augmentation.parameters.seed = seed_base + augmentation_index
+seed_base: 42
+
+# Prompt diversity while preserving the same environment type. The generator
+# should inject exactly one of these into
+# captioning.llm.variables.variation_instruction for each generated config.
+variation_instructions:
+  - "Use a different plausible fixed lower wall-mounted corner or upper-wall camera position while keeping the camera static, closer than a distant CCTV overview, and tilted downward around 25 to 35 degrees."
+  - "Vary the visible layout and object arrangement while keeping the same environment type and realistic surveillance perspective."
+  - "Vary the people positions, poses, clothing, and scale while keeping 2-3 realistic adults visible, full body where possible, and about 65-75% of visual attention."
+  - "Vary the lighting and normal activity details only within what is plausible for the requested environment."
+  - "Vary the foreground and background object placement without adding readable brand text, overlays, watermarks, or visible cameras."
+
+# Values copied into the generated runtime config for prompt expansion.
+# The generator should create:
+#   captioning.llm.variables.env_type: [<env_type>]
+#   captioning.llm.variables.env_description: [<env_description>]
+#   captioning.llm.variables.variation_instruction: [<selected instruction>]
+prompt_variables:
+  env_type: "${env_type}"
+  env_description: "${env_description}"
+
+# Optional runtime overrides applied to every generated config.
+runtime_overrides:
+  pipeline.retry: 1
+  pipeline.regenerate_caption_on_retry: false
+  augmentation.parameters.size: "1024x576"
+  augmentation.parameters.width: 1024
+  augmentation.parameters.height: 576
+  augmentation.parameters.num_inference_steps: 50
+  augmentation.parameters.guidance_scale: 6.0
+  augmentation.parameters.extra_params.guardrails: false

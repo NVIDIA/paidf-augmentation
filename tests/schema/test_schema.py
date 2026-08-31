@@ -27,6 +27,14 @@ def _load_yaml(path: str) -> dict:
         return yaml.safe_load(f)
 
 
+def _ep(id, role, url, model="test", adapter=None) -> dict:
+    """Build an endpoint-registry list entry."""
+    entry = {"id": id, "role": role, "url": url, "model": model}
+    if adapter is not None:
+        entry["adapter"] = adapter
+    return entry
+
+
 def _minimal_config(**overrides) -> dict:
     """Return a minimal valid config dict for cosmos-transfer2.5."""
     base = {
@@ -40,9 +48,14 @@ def _minimal_config(**overrides) -> dict:
                 },
             }
         ],
-        "endpoints": {
-            "cosmos_transfer": {"url": "http://localhost:30002/", "model": "test"},
-        },
+        "endpoints": [
+            _ep(
+                "cosmos_transfer",
+                "video_transfer",
+                "http://localhost:30002/",
+                adapter="nim",
+            ),
+        ],
         "augmentation": {
             "model": {"name": "cosmos-transfer2.5"},
         },
@@ -54,10 +67,9 @@ def _minimal_config(**overrides) -> dict:
 def _minimal_config_with_captioning() -> dict:
     """Return a minimal config with VLM captioning."""
     config = _minimal_config()
-    config["endpoints"]["vlm"] = {
-        "url": "http://localhost:9001/v1",
-        "model": "test-vlm",
-    }
+    config["endpoints"].append(
+        _ep("vlm", "vlm", "http://localhost:9001/v1", "test-vlm")
+    )
     config["captioning"] = {
         "vlm": {"system_prompt": "test", "user_prompt": "test"},
     }
@@ -77,11 +89,11 @@ def _minimal_config_image_edit() -> dict:
                 },
             }
         ],
-        "endpoints": {
-            "image_edit": {"url": "http://localhost:8080/v1", "model": "test-edit"},
-        },
+        "endpoints": [
+            _ep("image_edit", "image_edit", "http://localhost:8080/v1", "test-edit"),
+        ],
         "augmentation": {
-            "model": {"name": "image-edit", "executor_type": "gradio"},
+            "model": {"name": "image-edit"},
             "parameters": {"num_inference_steps": 50, "guidance_scale": 1.0},
         },
     }
@@ -100,9 +112,15 @@ def _minimal_config_predict() -> dict:
                 },
             }
         ],
-        "endpoints": {
-            "cosmos_predict": {"url": "http://localhost:30003/", "model": "predict"},
-        },
+        "endpoints": [
+            _ep(
+                "cosmos_predict",
+                "video_predict",
+                "http://localhost:30003/",
+                "predict",
+                adapter="nim",
+            ),
+        ],
         "augmentation": {
             "model": {"name": "cosmos-predict"},
             "parameters": {
@@ -131,6 +149,15 @@ def _minimal_config_predict_text2world() -> dict:
                     "metadata": "/tmp/meta.json",
                 },
             }
+        ],
+        "endpoints": [
+            _ep(
+                "cosmos_predict",
+                "video_predict",
+                "http://localhost:30003/",
+                "predict",
+                adapter="nim",
+            ),
         ],
         "augmentation": {
             "model": {"name": "cosmos-predict"},
@@ -200,7 +227,7 @@ class TestValidConfigs:
 
     def test_with_vlm_llm_captioning(self):
         config = _minimal_config_with_captioning()
-        config["endpoints"]["llm"] = {"url": "http://localhost:8001/v1", "model": "llm"}
+        config["endpoints"].append(_ep("llm", "llm", "http://localhost:8001/v1", "llm"))
         config["captioning"]["llm"] = {
             "system_prompt": "test",
             "variables": {"weather": ["rain"]},
@@ -212,6 +239,10 @@ class TestValidConfigs:
 
     def test_with_evaluators(self):
         config = _minimal_config()
+        # attribute_verification needs an 'llm' (question generation) and a 'vlm'
+        # (its inline verifier) transport to resolve.
+        config["endpoints"].append(_ep("llm", "llm", "http://localhost:9002/v1", "llm"))
+        config["endpoints"].append(_ep("vlm", "vlm", "http://localhost:9001/v1", "vlm"))
         config["pipeline"] = {"retry": 1}
         config["evaluators"] = [
             {"hallucination_check": {"enabled": True, "threshold": 0.7}},
@@ -233,6 +264,7 @@ class TestValidConfigs:
 
     def test_standalone_vlm_verification(self):
         config = _minimal_config()
+        config["endpoints"].append(_ep("vlm", "vlm", "http://localhost:9001/v1", "vlm"))
         config["evaluators"] = [
             {"vlm_verification": {"system_prompt": "standalone test"}},
         ]
@@ -242,6 +274,10 @@ class TestValidConfigs:
 
     def test_attribute_verification_without_inline_vlm(self):
         config = _minimal_config()
+        # An enabled attribute_verification needs both an 'llm' (question
+        # generation) and a 'vlm' (the default verifier) transport.
+        config["endpoints"].append(_ep("llm", "llm", "http://localhost:9002/v1", "llm"))
+        config["endpoints"].append(_ep("vlm", "vlm", "http://localhost:9001/v1", "vlm"))
         config["evaluators"] = [
             {"attribute_verification": {"enabled": True}},
         ]
@@ -276,11 +312,11 @@ class TestValidConfigs:
 
     @pytest.mark.parametrize(
         "config_file",
-        sorted(CONFIGS_DIR.glob("config_*.yaml")),
-        ids=lambda p: p.name,
+        sorted(CONFIGS_DIR.rglob("config_*.yaml")),
+        ids=lambda p: str(p.relative_to(CONFIGS_DIR)),
     )
     def test_load_all_config_files(self, config_file):
-        """Every config_*.yaml in configs/ must validate against the schema."""
+        """Every config_*.yaml under configs/ (incl. cookbook/) must validate."""
         config = _load_yaml(str(config_file))
         PipelineConfig(**config)
 
@@ -292,10 +328,6 @@ class TestValidConfigs:
 
 class TestDefaults:
     """Verify that Pydantic defaults match the tuned values."""
-
-    def test_default_executor_type(self):
-        pc = PipelineConfig(**_minimal_config())
-        assert pc.augmentation.model.executor_type.value == "local"
 
     def test_default_pipeline_settings(self):
         pc = PipelineConfig(**_minimal_config())
@@ -358,57 +390,48 @@ class TestDefaults:
 class TestCrossSectionValidation:
     """Endpoint requirements are enforced across sections."""
 
-    def test_cosmos_transfer_local_no_endpoint_ok(self):
-        """Local executor doesn't require endpoints.cosmos_transfer."""
+    def test_cosmos_transfer_requires_endpoint(self):
+        """Every model now needs a resolvable endpoint (no local fallback)."""
         config = _minimal_config()
-        config["endpoints"] = {}
-        # executor_type defaults to 'local', so this should pass
-        pc = PipelineConfig(**config)
-        assert pc.augmentation.model.executor_type.value == "local"
-
-    def test_cosmos_transfer_gradio_requires_endpoint(self):
-        """Non-local executor requires endpoints.cosmos_transfer."""
-        config = _minimal_config()
-        config["endpoints"] = {}
-        config["augmentation"]["model"]["executor_type"] = "gradio"
-        with pytest.raises(ValidationError, match="cosmos_transfer"):
+        config["endpoints"] = []
+        with pytest.raises(ValidationError, match="requires a matching"):
             PipelineConfig(**config)
 
-    def test_cosmos_predict_local_no_endpoint_ok(self):
-        """Local executor doesn't require endpoints.cosmos_predict."""
+    def test_cosmos_predict_requires_endpoint(self):
         config = _minimal_config_predict()
-        config["endpoints"] = {}
-        pc = PipelineConfig(**config)
-        assert pc.augmentation.model.name == ModelNameEnum.COSMOS_PREDICT
-
-    def test_cosmos_predict_gradio_requires_endpoint(self):
-        """Non-local executor requires endpoints.cosmos_predict."""
-        config = _minimal_config_predict()
-        config["endpoints"] = {}
-        config["augmentation"]["model"]["executor_type"] = "gradio"
-        with pytest.raises(ValidationError, match="cosmos_predict"):
+        config["endpoints"] = []
+        with pytest.raises(ValidationError, match="requires a matching"):
             PipelineConfig(**config)
 
     def test_image_edit_requires_endpoint(self):
         config = _minimal_config_image_edit()
-        config["endpoints"] = {}
-        with pytest.raises(ValidationError, match="image_edit"):
+        config["endpoints"] = []
+        with pytest.raises(ValidationError, match="requires a matching"):
             PipelineConfig(**config)
 
-    def test_vlm_captioning_requires_vlm_endpoint(self):
+    def test_unknown_adapter_rejected(self):
+        config = _minimal_config_image_edit()
+        config["endpoints"][0]["adapter"] = "not-a-real-adapter"
+        with pytest.raises(ValidationError, match="unknown adapter"):
+            PipelineConfig(**config)
+
+    def test_vlm_captioning_requires_vlm_endpoint(self, monkeypatch):
+        monkeypatch.delenv("VLM_ENDPOINT_URL", raising=False)
         config = _minimal_config_with_captioning()
-        del config["endpoints"]["vlm"]
-        with pytest.raises(ValidationError, match="endpoints.vlm"):
+        config["endpoints"] = [ep for ep in config["endpoints"] if ep["role"] != "vlm"]
+        with pytest.raises(ValidationError, match="role 'vlm'"):
             PipelineConfig(**config)
 
-    def test_llm_captioning_requires_llm_endpoint(self):
+    def test_llm_captioning_requires_llm_endpoint(self, monkeypatch):
+        monkeypatch.delenv("LLM_ENDPOINT_URL", raising=False)
+        monkeypatch.delenv("LLM_CAPTION_ENDPOINT_URL", raising=False)
         config = _minimal_config()
-        config["endpoints"]["vlm"] = {"url": "http://x", "model": "x"}
+        config["endpoints"].append(_ep("vlm", "vlm", "http://x", "x"))
         config["captioning"] = {
             "vlm": {"system_prompt": "t", "user_prompt": "t"},
             "llm": {"system_prompt": "t", "variables": {"a": ["b"]}},
         }
-        with pytest.raises(ValidationError, match="endpoints.llm"):
+        with pytest.raises(ValidationError, match="role 'llm'"):
             PipelineConfig(**config)
 
     def test_text_captioning_does_not_require_llm_endpoint(self):
@@ -437,6 +460,163 @@ class TestCrossSectionValidation:
         with pytest.raises(ValidationError, match="mutually exclusive"):
             PipelineConfig(**config)
 
+    def test_attribute_verification_requires_llm_endpoint(self, monkeypatch):
+        monkeypatch.delenv("LLM_ENDPOINT_URL", raising=False)
+        config = _minimal_config()  # only a video_transfer endpoint, no llm/vlm
+        config["evaluators"] = [{"attribute_verification": {"enabled": True}}]
+        with pytest.raises(ValidationError, match="role 'llm'"):
+            PipelineConfig(**config)
+
+    def test_attribute_verification_requires_vlm_endpoint(self, monkeypatch):
+        # An enabled attribute_verification needs a VLM too, even with no inline
+        # vlm_verification block (it silently no-ops otherwise).
+        monkeypatch.delenv("VLM_ENDPOINT_URL", raising=False)
+        config = _minimal_config()
+        config["endpoints"].append(_ep("llm", "llm", "http://x", "x"))
+        config["evaluators"] = [{"attribute_verification": {"enabled": True}}]
+        with pytest.raises(ValidationError, match="role 'vlm'"):
+            PipelineConfig(**config)
+
+    def test_disabled_attribute_verification_skips_endpoint_check(self, monkeypatch):
+        monkeypatch.delenv("LLM_ENDPOINT_URL", raising=False)
+        monkeypatch.delenv("VLM_ENDPOINT_URL", raising=False)
+        config = _minimal_config()  # no llm/vlm endpoint
+        config["evaluators"] = [{"attribute_verification": {"enabled": False}}]
+        pc = PipelineConfig(**config)  # disabled -> no transport required
+        assert pc.evaluators[0].attribute_verification.enabled is False
+
+    def test_standalone_vlm_verification_requires_vlm_endpoint(self, monkeypatch):
+        monkeypatch.delenv("VLM_ENDPOINT_URL", raising=False)
+        config = _minimal_config()  # no vlm endpoint
+        config["evaluators"] = [{"vlm_verification": {"system_prompt": "t"}}]
+        with pytest.raises(ValidationError, match="role 'vlm'"):
+            PipelineConfig(**config)
+
+    def test_evaluator_endpoint_satisfied_by_env(self, monkeypatch):
+        """A role env override (no endpoints entry) satisfies the presence check."""
+        monkeypatch.setenv("VLM_ENDPOINT_URL", "http://localhost:9001/v1")
+        config = _minimal_config()  # no vlm endpoint, but env supplies it
+        config["evaluators"] = [{"vlm_verification": {"system_prompt": "t"}}]
+        pc = PipelineConfig(**config)
+        assert pc.evaluators[0].vlm_verification.system_prompt == "t"
+
+    def test_two_same_role_endpoints_require_id_even_with_env(self, monkeypatch):
+        # An env URL override does NOT disambiguate 2+ same-role endpoints (it
+        # can't say which one), and runtime select_endpoint() raises on the
+        # ambiguous match — so this must fail validation, not crash at startup.
+        monkeypatch.setenv("VLM_ENDPOINT_URL", "http://env/v1")
+        config = _minimal_config()
+        config["endpoints"].append(_ep("vlm-a", "vlm", "http://a/v1", "a"))
+        config["endpoints"].append(_ep("vlm-b", "vlm", "http://b/v1", "b"))
+        config["evaluators"] = [{"vlm_verification": {"system_prompt": "t"}}]
+        with pytest.raises(ValidationError, match="set endpoint_id"):
+            PipelineConfig(**config)
+
+    def test_two_same_role_endpoints_ok_when_id_pins_one(self, monkeypatch):
+        monkeypatch.delenv("VLM_ENDPOINT_URL", raising=False)
+        config = _minimal_config()
+        config["endpoints"].append(_ep("vlm-a", "vlm", "http://a/v1", "a"))
+        config["endpoints"].append(_ep("vlm-b", "vlm", "http://b/v1", "b"))
+        config["evaluators"] = [
+            {"vlm_verification": {"system_prompt": "t", "endpoint_id": "vlm-b"}}
+        ]
+        pc = PipelineConfig(**config)
+        assert pc.evaluators[0].vlm_verification.endpoint_id == "vlm-b"
+
+
+class TestEndpointSelection:
+    """BYOM endpoint_id selection guards at PipelineConfig construction."""
+
+    def test_captioning_llm_endpoint_id_not_found(self, monkeypatch):
+        monkeypatch.delenv("LLM_ENDPOINT_URL", raising=False)
+        monkeypatch.delenv("LLM_CAPTION_ENDPOINT_URL", raising=False)
+        config = _minimal_config()
+        config["endpoints"].append(_ep("llm-a", "llm", "http://x", "x"))
+        config["captioning"] = {
+            "llm": {
+                "system_prompt": "t",
+                "variables": {"a": ["b"]},
+                "endpoint_id": "does-not-exist",
+            }
+        }
+        with pytest.raises(ValidationError, match="not found"):
+            PipelineConfig(**config)
+
+    def test_endpoint_id_wrong_role_rejected(self, monkeypatch):
+        monkeypatch.delenv("LLM_ENDPOINT_URL", raising=False)
+        monkeypatch.delenv("LLM_CAPTION_ENDPOINT_URL", raising=False)
+        config = _minimal_config()
+        config["endpoints"].append(_ep("vlm-a", "vlm", "http://x", "x"))
+        config["endpoints"].append(_ep("llm-a", "llm", "http://x", "x"))
+        config["captioning"] = {
+            "llm": {
+                "system_prompt": "t",
+                "variables": {"a": ["b"]},
+                "endpoint_id": "vlm-a",
+            }
+        }
+        with pytest.raises(ValidationError, match="has role 'vlm'"):
+            PipelineConfig(**config)
+
+    def test_two_llm_endpoints_distinct_selectors_ok(self, monkeypatch):
+        monkeypatch.delenv("LLM_ENDPOINT_URL", raising=False)
+        monkeypatch.delenv("LLM_CAPTION_ENDPOINT_URL", raising=False)
+        config = _minimal_config()
+        config["endpoints"].append(_ep("llm-cap", "llm", "http://a", "a"))
+        config["endpoints"].append(_ep("llm-qg", "llm", "http://b", "b"))
+        config["endpoints"].append(_ep("vlm", "vlm", "http://c", "c"))
+        config["captioning"] = {
+            "llm": {
+                "system_prompt": "t",
+                "variables": {"a": ["b"]},
+                "endpoint_id": "llm-cap",
+            }
+        }
+        config["evaluators"] = [
+            {
+                "attribute_verification": {
+                    "question_generation": {"endpoint_id": "llm-qg"},
+                }
+            }
+        ]
+        pc = PipelineConfig(**config)
+        assert pc.captioning.llm.endpoint_id == "llm-cap"
+        qg = pc.evaluators[0].attribute_verification.question_generation
+        assert qg.endpoint_id == "llm-qg"
+
+    def test_ambiguous_vlm_role_without_endpoint_id_rejected(self, monkeypatch):
+        monkeypatch.delenv("VLM_ENDPOINT_URL", raising=False)
+        config = _minimal_config()
+        config["endpoints"].append(_ep("vlm-a", "vlm", "http://a", "a"))
+        config["endpoints"].append(_ep("vlm-b", "vlm", "http://b", "b"))
+        config["captioning"] = {
+            "vlm": {"system_prompt": "t", "user_prompt": "t"},
+        }
+        with pytest.raises(ValidationError, match="endpoint_id"):
+            PipelineConfig(**config)
+
+    def test_duplicate_ids_rejected(self):
+        config = _minimal_config()
+        config["endpoints"].append(_ep("dup", "vlm", "http://a", "a"))
+        config["endpoints"].append(_ep("dup", "llm", "http://b", "b"))
+        with pytest.raises(ValidationError, match="duplicate endpoint ids"):
+            PipelineConfig(**config)
+
+    def test_id_omitted_resolves_by_role(self, monkeypatch):
+        monkeypatch.delenv("VLM_ENDPOINT_URL", raising=False)
+        config = _minimal_config()
+        # An endpoint with no id at all (now optional) plus captioning.vlm.
+        config["endpoints"].append(
+            {"role": "vlm", "url": "http://localhost:9001/v1", "model": "test-vlm"}
+        )
+        config["captioning"] = {
+            "vlm": {"system_prompt": "t", "user_prompt": "t"},
+        }
+        pc = PipelineConfig(**config)
+        vlm_eps = [ep for ep in pc.endpoints if ep.role == "vlm"]
+        assert len(vlm_eps) == 1
+        assert vlm_eps[0].id is None
+
 
 # ---------------------------------------------------------------------------
 # Negative tests — invalid configs are rejected
@@ -446,21 +626,27 @@ class TestCrossSectionValidation:
 class TestInvalidConfigs:
     """Configs that must be rejected with clear errors."""
 
-    def test_invalid_model_name(self):
+    def test_unknown_model_without_endpoint_rejected(self):
+        """BYOM model names are free-form, but must resolve to an endpoint."""
         config = _minimal_config()
-        config["augmentation"]["model"]["name"] = "invalid-model"
-        with pytest.raises(ValidationError):
+        config["augmentation"]["model"]["name"] = "my-unmapped-model"
+        with pytest.raises(ValidationError, match="requires a matching"):
             PipelineConfig(**config)
 
-    def test_invalid_executor_type(self):
+    def test_byom_model_name_with_matching_endpoint_ok(self):
+        """A free-form model name resolves by endpoint id."""
         config = _minimal_config()
-        config["augmentation"]["model"]["executor_type"] = "invalid"
-        with pytest.raises(ValidationError):
-            PipelineConfig(**config)
+        config["augmentation"]["model"]["name"] = "my-byom-model"
+        config["endpoints"] = [
+            _ep("my-byom-model", "image_edit", "http://x", adapter="nim"),
+        ]
+        # rgb input is supplied by _minimal_config, role image_edit -> rgb ok.
+        pc = PipelineConfig(**config)
+        assert pc.augmentation.model.name == "my-byom-model"
 
     def test_missing_data_section(self):
         with pytest.raises(ValidationError):
-            PipelineConfig(endpoints={})
+            PipelineConfig(endpoints=[])
 
     def test_empty_data_list(self):
         config = _minimal_config()
@@ -533,6 +719,8 @@ class TestExtraQuestions:
 
     def test_valid_extra_question(self):
         config = _minimal_config()
+        config["endpoints"].append(_ep("llm", "llm", "http://localhost:9002/v1", "llm"))
+        config["endpoints"].append(_ep("vlm", "vlm", "http://localhost:9001/v1", "vlm"))
         config["evaluators"] = [
             {
                 "attribute_verification": {
@@ -553,6 +741,8 @@ class TestExtraQuestions:
 
     def test_extra_question_with_reasoning(self):
         config = _minimal_config()
+        config["endpoints"].append(_ep("llm", "llm", "http://localhost:9002/v1", "llm"))
+        config["endpoints"].append(_ep("vlm", "vlm", "http://localhost:9001/v1", "vlm"))
         config["evaluators"] = [
             {
                 "attribute_verification": {
