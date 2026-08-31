@@ -1,4 +1,4 @@
-== augmentation (/app/pyproject.toml) ==
+== augmentation (/workspace/pyproject.toml) ==
 
                                                  
                       Info                       
@@ -15,7 +15,7 @@
 ┏━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 ┃ Compatible ┃ Package                   ┃ License(s)                          ┃
 ┡━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-│ ✔          │ annotated-types           │ MIT LICENSE                         │
+│ ✔          │ annotated-types           │ MIT                                 │
 │ ✔          │ antlr4-python3-runtime    │ BSD                                 │
 │ ✔          │ anyio                     │ MIT                                 │
 │ ✔          │ attrs                     │ MIT LICENSE                         │
@@ -25,19 +25,20 @@
 │ ✔          │ bracex                    │ MIT                                 │
 │ ✖          │ certifi                   │ MOZILLA PUBLIC LICENSE 2.0 _MPL     │
 │            │                           │ 2.0_                                │
-│ ✔          │ cffi                      │ MIT                                 │
+│ ✔          │ cffi                      │ MIT-0                               │
 │ ✔          │ charset-normalizer        │ MIT                                 │
+│ ✔          │ cmake                     │ APACHE SOFTWARE LICENSE;; BSD       │
+│            │                           │ LICENSE                             │
+│ ✔          │ cuda-pathfinder           │ APACHE-2.0                          │
+│ ✔          │ cupy-cuda13x              │ MIT                                 │
+│ ✔          │ cython                    │ APACHE-2.0                          │
 │ ✔          │ distro                    │ APACHE SOFTWARE LICENSE             │
-│ ✔          │ exceptiongroup            │ MIT LICENSE                         │
 │ ✔          │ filelock                  │ MIT                                 │
-│ ✔          │ fsspec                    │ BSD-3-CLAUSE                        │
-│ ✔          │ gradio-client             │ APACHE-2.0                          │
 │ ✔          │ h11                       │ MIT LICENSE                         │
-│ ✔          │ hf-xet                    │ APACHE SOFTWARE LICENSE             │
 │ ✔          │ httpcore                  │ BSD-3-CLAUSE                        │
 │ ✔          │ httpx                     │ BSD LICENSE                         │
-│ ✔          │ huggingface-hub           │ APACHE SOFTWARE LICENSE             │
 │ ✔          │ idna                      │ BSD-3-CLAUSE                        │
+│ ✔          │ importlib-metadata        │ APACHE-2.0                          │
 │ ✔          │ jiter                     │ MIT                                 │
 │ ✔          │ jmespath                  │ MIT LICENSE                         │
 │ ✔          │ jsonschema                │ MIT                                 │
@@ -47,9 +48,10 @@
 │ ✔          │ numpy                     │ BSD LICENSE                         │
 │ ✔          │ omegaconf                 │ BSD LICENSE                         │
 │ ✔          │ openai                    │ APACHE SOFTWARE LICENSE             │
-│ ✔          │ opencv-python-headless    │ APACHE SOFTWARE LICENSE             │
+│ ✔          │ opencv-python             │ APACHE SOFTWARE LICENSE             │
 │ ✔          │ opentelemetry-api         │ APACHE-2.0                          │
 │ ✔          │ packaging                 │ APACHE-2.0;; BSD-2-CLAUSE           │
+│ ✔          │ pip                       │ MIT                                 │
 │ ✔          │ prettytable               │ BSD-3-CLAUSE                        │
 │ ✔          │ psutil                    │ BSD-3-CLAUSE                        │
 │ ✔          │ pycparser                 │ BSD-3-CLAUSE                        │
@@ -62,6 +64,8 @@
 │ ✔          │ requests                  │ APACHE SOFTWARE LICENSE             │
 │ ✔          │ rpds-py                   │ MIT                                 │
 │ ✔          │ s3transfer                │ APACHE SOFTWARE LICENSE             │
+│ ✔          │ scikit-build              │ MIT LICENSE                         │
+│ ✔          │ setuptools                │ MIT                                 │
 │ ✔          │ six                       │ MIT LICENSE                         │
 │ ✔          │ sniffio                   │ APACHE SOFTWARE LICENSE;; MIT       │
 │            │                           │ LICENSE                             │
@@ -72,51 +76,20 @@
 │ ✔          │ urllib3                   │ MIT                                 │
 │ ✔          │ wcmatch                   │ MIT                                 │
 │ ✔          │ wcwidth                   │ MIT                                 │
+│ ✔          │ wheel                     │ MIT                                 │
 │ ✔          │ xattr                     │ MIT                                 │
+│ ✔          │ zipp                      │ MIT                                 │
 └────────────┴───────────────────────────┴─────────────────────────────────────┘
 
+== non-Python components (/workspace, built from source or copied into the image) ==
 
-== cosmos-transfer2.5 (/opt/cosmos-transfer2.5/pyproject.toml) ==
+licensecheck only covers Python distributions. The image also redistributes the
+components below. Their full license texts are in LICENSE-3rd-party.txt and their
+upstream sources are preserved inside the image under /usr/share/oss-sources/.
 
-                                    
-                Info                
-┏━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┓
-┃ Item            ┃ Value          ┃
-┡━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━┩
-│ program         │ licensecheck   │
-│ version         │ 2025.1.0       │
-│ license         │ MIT LICENSE    │
-│ project_license │ APACHE LICENSE │
-└─────────────────┴────────────────┘
-                        
-     List Of Errors     
-┏━━━━━━━━━━━━━━━━━━━━━━┓
-┃ Package              ┃
-┡━━━━━━━━━━━━━━━━━━━━━━┩
-│ COSMOS-OSS           │
-│ VIDEO-DEPTH-ANYTHING │
-└──────────────────────┘
-                                                                                
-                                List Of Packages                                
-┏━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ Compatible ┃ Package              ┃ License(s)                               ┃
-┡━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-│ ✔          │ ATTRS                │ MIT LICENSE                              │
-│ ✔          │ CATTRS               │ MIT LICENSE                              │
-│ ✔          │ EASYDICT             │ GNU LESSER GENERAL PUBLIC LICENSE V3     │
-│            │                      │ _LGPLV3_                                 │
-│ ✔          │ EXCEPTIONGROUP       │ MIT LICENSE                              │
-│ ✔          │ GLCONTEXT            │ MIT LICENSE                              │
-│ ✔          │ MODERNGL             │ MIT LICENSE                              │
-│ ✔          │ NATSORT              │ MIT LICENSE                              │
-│ ✔          │ NUMPY                │ 0BSD;; BSD-3-CLAUSE;; CC0-1.0;; MIT;;    │
-│            │                      │ ZLIB                                     │
-│ ✔          │ OPENEXR              │ BSD-3-CLAUSE                             │
-│ ✔          │ PYARROW              │ APACHE-2.0                               │
-│ ✔          │ SAM2                 │ APACHE 2.0                               │
-│ ✔          │ SHAPELY              │ BSD LICENSE                              │
-│ ✔          │ TYPING-EXTENSIONS    │ PSF-2.0                                  │
-│ ✔          │ VIDEO-DEPTH-ANYTHING │ APACHE-2.0                               │
-└────────────┴──────────────────────┴──────────────────────────────────────────┘
-
-
+  Component            Version      License
+  ------------------   ----------   -----------------
+  ffmpeg               9.0.1        LGPL-2.1-or-later    (--disable-gpl --disable-nonfree)
+  nv-codec-headers     n12.1.14.0   MIT
+  python (CPython)     3.13.15      PSF-2.0
+  uv                   0.12.5       Apache-2.0 OR MIT

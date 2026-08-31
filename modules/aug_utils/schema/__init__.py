@@ -9,27 +9,30 @@ Import ``PipelineConfig`` and call ``PipelineConfig(**yaml_dict)`` to validate
 and parse a raw config dictionary.
 """
 
+from .adapters import KNOWN_ADAPTERS
 from .base import BaseInferenceParameters
-from .data import ControlInputs, DataInputs, DataOutput, DataSample
-from .endpoints import EndpointConfig, EndpointsConfig
+from .data import ControlInputs, DataInputs, DataOutput, DataSample, PromptAttributes
+from .endpoints import Endpoint
 from .pipeline import EvaluationSettings, LoggingConfig, PipelineSettings
 from .captioning import (
     CaptioningConfig,
     LLMCaptioningConfig,
     LLMParameters,
+    TemplateCaptioningConfig,
+    TemplateAttributeCatalog,
     VLMCaptioningConfig,
     VLMParameters,
 )
 from .augmentation import (
     AugmentationConfig,
     AugmentationParameters,
-    ExecutorTypeEnum,
-    LocalParameters,
     ModalitiesConfig,
     ModelConfig,
     ModelNameEnum,
+    PredictInferenceType,
 )
 from .data_processing import AlignmentParameters, DataProcessingConfig
+from .preprocessing import PreprocessingConfig, ResizeConfig
 from .evaluators import (
     AttributeVerificationEvaluator,
     EvaluatorEntry,
@@ -44,30 +47,34 @@ from .config import PipelineConfig
 
 __all__ = [
     "PipelineConfig",
+    "KNOWN_ADAPTERS",
     "BaseInferenceParameters",
     "ControlInputs",
     "DataInputs",
     "DataOutput",
+    "PromptAttributes",
     "DataSample",
-    "EndpointConfig",
-    "EndpointsConfig",
+    "Endpoint",
     "EvaluationSettings",
     "LoggingConfig",
     "PipelineSettings",
     "CaptioningConfig",
     "LLMCaptioningConfig",
     "LLMParameters",
+    "TemplateAttributeCatalog",
+    "TemplateCaptioningConfig",
     "VLMCaptioningConfig",
     "VLMParameters",
     "AugmentationConfig",
     "AugmentationParameters",
-    "ExecutorTypeEnum",
-    "LocalParameters",
     "ModalitiesConfig",
     "ModelConfig",
     "ModelNameEnum",
+    "PredictInferenceType",
     "AlignmentParameters",
     "DataProcessingConfig",
+    "PreprocessingConfig",
+    "ResizeConfig",
     "AttributeVerificationEvaluator",
     "EvaluatorEntry",
     "ExtraQuestion",

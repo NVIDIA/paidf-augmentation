@@ -14,6 +14,7 @@ import os
 import tempfile
 import time
 from dataclasses import dataclass
+from itertools import zip_longest
 from typing import Any, Dict, Tuple
 
 import av
@@ -267,7 +268,34 @@ class HallucinationChecker:
                 total_aug = 0
                 frame_count = 1
 
-                for fo, fa in zip(it_o, it_a, strict=True):
+                # The generated video may not have exactly the same frame count as
+                # the input (e.g. Cosmos Transfer can emit a few extra frames), so
+                # align frame-by-frame over the overlap rather than requiring equal
+                # lengths. ``zip_longest`` with a sentinel stops at the shorter
+                # stream *without* silently pulling and dropping a surplus frame
+                # from the longer one (plain ``zip`` discards the extra ``it_o``
+                # frame it consumes when ``it_a`` ends first).
+                frame_missing = object()
+                for fo, fa in zip_longest(it_o, it_a, fillvalue=frame_missing):
+                    if fo is frame_missing or fa is frame_missing:
+                        # Length mismatch: this pair holds the first surplus frame
+                        # of the longer stream (the other side is already
+                        # exhausted). Count it plus the remaining tail — without
+                        # comparing — so no frame is consumed silently, then stop.
+                        extra_o = (0 if fo is frame_missing else 1) + sum(
+                            1 for _ in it_o
+                        )
+                        extra_a = (0 if fa is frame_missing else 1) + sum(
+                            1 for _ in it_a
+                        )
+                        if extra_o or extra_a:
+                            self.logger.warning(
+                                "Hallucination check: input/output frame counts differ "
+                                f"(compared {frame_count} aligned frames; "
+                                f"{extra_o} extra input + {extra_a} extra output frame(s) ignored)."
+                            )
+                        break
+
                     fa = self._ensure_same_size(fa, (h, w))
                     go = self._to_gray(fo)
                     ga = self._to_gray(fa)

@@ -4,12 +4,10 @@
 
 import json
 import logging
-import os
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from openai import OpenAI
-
+from generation.adapters.openai_chat import OpenAIChatAdapter
 from captioning.base import BaseCaptioner
 from aug_utils.common import validate_and_cast_config_params
 
@@ -46,6 +44,7 @@ class LLMCaptioner(BaseCaptioner):
         presence_penalty: float = 0.0,
         max_tokens: int = 512,
         stream: bool = True,
+        api_key_env: Optional[str] = None,
     ):
         super().__init__(logger)
 
@@ -80,8 +79,18 @@ class LLMCaptioner(BaseCaptioner):
         self.endpoint = validated["endpoint"].rstrip("/")
         self.model = validated["model"]
 
-        api_key = os.environ.get("LLM_API_KEY") or "not-used"
-        self.client = OpenAI(base_url=self.endpoint, api_key=api_key)
+        # Route chat.completions through the shared one-client adapter. Key
+        # resolved from the endpoint's api_key_env env var when supplied, else
+        # the role default (LLM_API_KEY). A 7200s timeout is passed (the SDK
+        # default previously applied was less lenient).
+        self.adapter = OpenAIChatAdapter.for_chat(
+            self.endpoint,
+            self.model,
+            self.logger,
+            role="llm",
+            timeout=7200,
+            api_key_env=api_key_env,
+        )
 
     @staticmethod
     def _normalize_variables(variables: Dict[str, Any]) -> Dict[str, str]:
@@ -156,7 +165,7 @@ class LLMCaptioner(BaseCaptioner):
                     media_path,
                     self.variables,
                 )
-                completion = self.client.chat.completions.create(
+                completion = self.adapter.chat(
                     model=self.model,
                     messages=[
                         {"role": "system", "content": self.system_prompt},

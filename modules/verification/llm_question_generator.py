@@ -3,12 +3,12 @@
 
 import json
 import logging
-import os
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import openai
-from openai import OpenAI
+
+from generation.adapters.openai_chat import OpenAIChatAdapter
 from aug_utils.common import validate_and_cast_config_params
 
 
@@ -147,6 +147,8 @@ class LLMQuestionGenerator:
         endpoint: str,
         model: str,
         logger: logging.Logger,
+        api_key_env: Optional[str] = None,
+        generate_options: bool = False,
     ):
         # Validate and cast parameters to ensure correct types
         params = {
@@ -177,17 +179,24 @@ class LLMQuestionGenerator:
         self.endpoint = validated_params["endpoint"]
         self.model = validated_params["model"]
 
-        api_key = os.environ.get("LLM_API_KEY")
-        if not api_key:
-            logger.warning("No LLM_API_KEY set. Using 'not-used' as placeholder.")
-            api_key = "not-used"
-
-        self.client = OpenAI(
-            base_url=endpoint,
-            api_key=api_key,
-        )
-
         self.logger = logger
+        # When True, the LLM invents the distractor options itself (the curated
+        # option pool is ignored); only the correct answer stays pinned to the
+        # selected ground-truth value in _repair_question_options.
+        self.generate_options = bool(generate_options)
+
+        # Route chat.completions through the shared one-client adapter. Key
+        # resolved from the endpoint's api_key_env env var when supplied, else
+        # the role default (LLM_API_KEY). A 7200s timeout is passed (the SDK
+        # default previously applied was less lenient).
+        self.adapter = OpenAIChatAdapter.for_chat(
+            endpoint,
+            self.model,
+            logger,
+            role="llm",
+            timeout=7200,
+            api_key_env=api_key_env,
+        )
 
     @classmethod
     def from_config(
@@ -197,6 +206,7 @@ class LLMQuestionGenerator:
         endpoint: str,
         model: str,
         logger: logging.Logger,
+        api_key_env: Optional[str] = None,
     ):
         """
         Create LLMQuestionGenerator instance from configuration dictionary with type validation.
@@ -245,6 +255,8 @@ class LLMQuestionGenerator:
             endpoint=validated_params["endpoint"],
             model=validated_params["model"],
             logger=logger,
+            api_key_env=api_key_env,
+            generate_options=bool(config_params.get("generate_options", False)),
         )
 
     def _sanitize_model_output(self, text: str) -> str:
@@ -377,6 +389,36 @@ class LLMQuestionGenerator:
             str: The formatted user prompt
         """
         variable_label = _format_variable_label(variable_name)
+        if not all_options:
+            # Open mode: the LLM invents the distractors itself. Only the correct
+            # value is fixed (ground truth); _repair_question_options keeps these
+            # LLM-written options and pins the correct answer to the selected value.
+            return f"""Generate a verification question for the following attribute:
+
+Variable: {variable_name}
+Readable label: {variable_label}
+Correct value: {selected_value}
+
+Create ONE multiple choice question that verifies whether '{selected_value}' is visible in the video frames.
+
+Requirements:
+1. The question MUST explicitly name the attribute (use the readable label). No vague wording like "What is shown?".
+2. Provide 3-4 total options. Exactly ONE option must be the correct value '{selected_value}'.
+3. Invent the OTHER options yourself: plausible but clearly WRONG, visually distinct alternatives for this attribute. Do NOT use near-synonyms, paraphrases, parent/child labels, or overlapping categories of the correct value.
+4. Keep options short and mutually exclusive.
+5. Format the correct answer as a single letter (A, B, C, or D).
+
+Output MUST be a single JSON object with the following structure:
+{{
+    "variable": "{variable_name}",
+    "value": "{selected_value}",
+    "question": "Question text?",
+    "options": {{"A": "option1", "B": "option2", "C": "option3", "D": "option4"}},
+    "correct_answer": "B"
+}}
+
+Do NOT include any explanatory text, markdown fences, or comments. Output ONLY the JSON object."""
+
         return f"""Generate a verification question for the following variable:
 
 Variable: {variable_name}
@@ -508,9 +550,7 @@ Do NOT include any explanatory text, markdown fences, or comments. Output ONLY t
         # Limit to 4 options and assign letters.
         final_values = kept_values[:4]
         letters = ["A", "B", "C", "D"]
-        final_options = {
-            letters[i]: final_values[i] for i in range(len(final_values))
-        }
+        final_options = {letters[i]: final_values[i] for i in range(len(final_values))}
 
         # Set correct_answer to the letter of selected value.
         correct_letter = "A"
@@ -544,12 +584,16 @@ Do NOT include any explanatory text, markdown fences, or comments. Output ONLY t
         self.logger.debug(
             f"Generating question for variable '{variable_name}' with value '{selected_value}'"
         )
+        # generate_options mode: pass NO curated pool so the LLM supplies the
+        # distractors (an empty pool makes the prompt + repair keep the LLM's
+        # options); the correct answer stays pinned to the selected value.
+        pool = [] if self.generate_options else all_options
         retries_remaining = self.retry
 
         while True:
             try:
                 user_prompt = self._create_user_prompt(
-                    variable_name, selected_value, all_options
+                    variable_name, selected_value, pool
                 )
 
                 self.logger.debug(
@@ -558,7 +602,7 @@ Do NOT include any explanatory text, markdown fences, or comments. Output ONLY t
 
                 # Try structured output first (guided JSON), fall back to regular parsing
                 try:
-                    completion = self.client.chat.completions.create(
+                    completion = self.adapter.chat(
                         model=self.model,
                         messages=[
                             {"role": "system", "content": self.system_prompt},
@@ -587,7 +631,7 @@ Do NOT include any explanatory text, markdown fences, or comments. Output ONLY t
                     self.logger.debug(
                         f"Structured output not available ({e}), falling back to manual parsing"
                     )
-                    completion = self.client.chat.completions.create(
+                    completion = self.adapter.chat(
                         model=self.model,
                         messages=[
                             {"role": "system", "content": self.system_prompt},
@@ -621,7 +665,7 @@ Do NOT include any explanatory text, markdown fences, or comments. Output ONLY t
                     question=question,
                     variable_name=variable_name,
                     selected_value=selected_value,
-                    all_options=all_options,
+                    all_options=pool,
                 )
 
                 self.logger.info(
@@ -662,6 +706,7 @@ Do NOT include any explanatory text, markdown fences, or comments. Output ONLY t
         """
         self.logger.info(f"Generating questions for {len(variables)} variables")
         questions = []
+        failures: List[str] = []
 
         for variable_name, selected_value in variables.items():
             all_options = variable_options.get(variable_name, [selected_value])
@@ -674,9 +719,17 @@ Do NOT include any explanatory text, markdown fences, or comments. Output ONLY t
                 self.logger.error(
                     f"Failed to generate question for '{variable_name}': {e}"
                 )
-                # Continue with other variables even if one fails
-                # You could also choose to raise here if you want strict behavior
-                continue
+                failures.append(f"{variable_name}: {e}")
+
+        # Verifying only the variables that succeeded lets a sample pass on a
+        # subset of the configured checks, so an endpoint outage reads as a clean
+        # result. Fail the whole set instead.
+        if failures:
+            raise RuntimeError(
+                f"Question generation failed for {len(failures)} of "
+                f"{len(variables)} variable(s), so the sample cannot be fully "
+                f"verified: " + "; ".join(failures)
+            )
 
         if not questions:
             raise RuntimeError("Failed to generate any questions")

@@ -13,7 +13,6 @@ import multistorageclient as msc
 from omegaconf import OmegaConf
 
 from captioning.factory import create_captioner
-from data_processing import run_alignment
 from generation.factory import create_generator
 from generation.utils import generate_with_retries
 from verification.llm_question_generator import LLMQuestionGenerator
@@ -21,9 +20,11 @@ from verification.vlm_verifier import VLMVerifier
 from verification.core import AttributeVerifier
 from verification.hallucination_checker import HallucinationChecker
 from aug_utils.common import (
+    redact_overrides,
     validate_config_structure,
     validate_sample_data_availability,
 )
+from aug_utils.endpoint_registry import effective_adapter, select_endpoint
 from aug_utils.nvcf import load_secrets, NVCFProgressTracker
 
 
@@ -65,7 +66,9 @@ def validate_environment(logger: logging.Logger):
 def _init_evaluators(config, logger):
     """Initialise evaluators from the ``evaluators`` list in the config.
 
-    Returns (hallucination_checker, attribute_verifier).
+    Returns (hallucination_checker, attribute_verifier, av_config_obj,
+    vlm_verifier). The bare ``vlm_verifier`` comes back too so a
+    ``vlm_verification``-only config still reports the endpoint it used.
     """
     hallucination_checker = None
     llm_question_generator = None
@@ -78,10 +81,28 @@ def _init_evaluators(config, logger):
     else:
         evaluators = []
 
-    endpoints = config.get("endpoints") or {}
-    # Resolve endpoint dicts from Pydantic models if needed
-    if hasattr(endpoints, "model_dump"):
-        endpoints = endpoints.model_dump()
+    # endpoints is now a registry LIST (Endpoint objects or dicts).
+    endpoints = config.get("endpoints") or []
+
+    def _resolve_consumer_endpoint(role: str, endpoint_id: str = None):
+        """Resolve url/model/api_key_env for an evaluator consumer.
+
+        Returns a 3-tuple of strings/None. None-safe: when no endpoint resolves
+        (e.g. URL supplied only via env), url/model are "" and api_key_env is
+        None so the adapter falls back to the role-default key env var.
+        """
+        ep = select_endpoint(endpoints, role, endpoint_id, required=False)
+        if ep is None:
+            return "", "", None
+
+        def _get(name):
+            return ep.get(name) if isinstance(ep, dict) else getattr(ep, name, None)
+
+        return (
+            _get("url") or "",
+            _get("model") or "",
+            _get("api_key_env"),
+        )
 
     for entry in evaluators:
         # Support both Pydantic model and raw dict
@@ -106,25 +127,30 @@ def _init_evaluators(config, logger):
                     "Initializing attribute verification (question generator)..."
                 )
                 qg = av.get("question_generation", {})
-                llm_ep = endpoints.get("llm") or {}
+                qg_endpoint_id = qg.get("endpoint_id")
+                qg_url, qg_model, qg_key_env = _resolve_consumer_endpoint(
+                    "llm", qg_endpoint_id
+                )
                 llm_question_generator = LLMQuestionGenerator.from_config(
                     config_params=qg,
                     system_prompt=qg.get("system_prompt", ""),
-                    endpoint=(os.getenv("LLM_ENDPOINT_URL") or llm_ep.get("url", "")),
-                    model=(os.getenv("LLM_ENDPOINT_MODEL") or llm_ep.get("model", "")),
+                    endpoint=(os.getenv("LLM_ENDPOINT_URL") or qg_url),
+                    model=(os.getenv("LLM_ENDPOINT_MODEL") or qg_model),
+                    api_key_env=qg_key_env,
                     logger=logger,
                 )
                 # Initialize VLM verifier from inline vlm_verification config
                 # if present, otherwise fall back to endpoints.vlm with defaults.
                 if vlm_verifier is None:
                     inline_vlm = av.get("vlm_verification")
-                    vlm_ep = endpoints.get("vlm") or {}
-                    vlm_endpoint = os.getenv("VLM_ENDPOINT_URL") or vlm_ep.get(
-                        "url", ""
-                    )
-                    vlm_model = os.getenv("VLM_ENDPOINT_MODEL") or vlm_ep.get(
-                        "model", ""
-                    )
+                    vlm_endpoint_id = (inline_vlm or {}).get("endpoint_id")
+                    (
+                        vlm_url,
+                        vlm_model_ep,
+                        vlm_key_env,
+                    ) = _resolve_consumer_endpoint("vlm", vlm_endpoint_id)
+                    vlm_endpoint = os.getenv("VLM_ENDPOINT_URL") or vlm_url
+                    vlm_model = os.getenv("VLM_ENDPOINT_MODEL") or vlm_model_ep
                     if inline_vlm is not None and vlm_endpoint:
                         logger.info(
                             "Initializing VLM verifier from attribute_verification.vlm_verification..."
@@ -133,6 +159,7 @@ def _init_evaluators(config, logger):
                             config_params=inline_vlm,
                             endpoint=vlm_endpoint,
                             model=vlm_model,
+                            api_key_env=vlm_key_env,
                             logger=logger,
                         )
                     elif vlm_endpoint:
@@ -143,17 +170,22 @@ def _init_evaluators(config, logger):
                             config_params={"system_prompt": "", "parameters": {}},
                             endpoint=vlm_endpoint,
                             model=vlm_model,
+                            api_key_env=vlm_key_env,
                             logger=logger,
                         )
 
         elif entry.get("vlm_verification") is not None:
             vv = entry["vlm_verification"]
+            vv_endpoint_id = vv.get("endpoint_id")
+            vv_url, vv_model, vv_key_env = _resolve_consumer_endpoint(
+                "vlm", vv_endpoint_id
+            )
             logger.info("Initializing VLM verifier...")
-            vlm_ep = endpoints.get("vlm") or {}
             vlm_verifier = VLMVerifier.from_config(
                 config_params=vv,
-                endpoint=(os.getenv("VLM_ENDPOINT_URL") or vlm_ep.get("url", "")),
-                model=(os.getenv("VLM_ENDPOINT_MODEL") or vlm_ep.get("model", "")),
+                endpoint=(os.getenv("VLM_ENDPOINT_URL") or vv_url),
+                model=(os.getenv("VLM_ENDPOINT_MODEL") or vv_model),
+                api_key_env=vv_key_env,
                 logger=logger,
             )
 
@@ -166,7 +198,7 @@ def _init_evaluators(config, logger):
         )
         logger.info("Attribute verification initialized successfully")
 
-    return hallucination_checker, attribute_verifier, av_config_obj
+    return hallucination_checker, attribute_verifier, av_config_obj, vlm_verifier
 
 
 def _write_prompt_file(prompt_path: str, prompt: str, logger: logging.Logger) -> bool:
@@ -195,7 +227,10 @@ def _generate_prompt(
 
     logger.info("Running captioning...")
     try:
-        prompt = captioner.get_caption(rgb_path)
+        if hasattr(captioner, "get_caption_for_sample"):
+            prompt = captioner.get_caption_for_sample(sample, rgb_path)
+        else:
+            prompt = captioner.get_caption(rgb_path)
         logger.debug(f"Caption: {prompt}")
         logger.info("Captioning completed successfully")
     except Exception as e:
@@ -212,6 +247,332 @@ def _generate_prompt(
         return None
 
     return prompt
+
+
+def _first_values(values: dict) -> dict:
+    """Normalize configured variable lists for compact metadata."""
+    return {
+        key: (value[0] if isinstance(value, list) and value else value)
+        for key, value in (values or {}).items()
+    }
+
+
+def _captioning_selections(config: dict, sample: dict | None = None) -> dict:
+    """Return configured template IDs or existing LLM selections."""
+    captioning_cfg = config.get("captioning") or {}
+    if captioning_cfg.get("template") is not None:
+        inputs = (sample or {}).get("inputs") or {}
+        selections = inputs.get("prompt_attributes") or {}
+        if not isinstance(selections, dict):
+            return {}
+        return {
+            key: value.strip() if isinstance(value, str) else value
+            for key, value in selections.items()
+        }
+
+    llm_cfg = captioning_cfg.get("llm") or {}
+    values = llm_cfg.get("verification_values") or llm_cfg.get("variables") or {}
+    return _first_values(values)
+
+
+def _attribute_verification_inputs(
+    config: dict, sample: dict | None = None
+) -> tuple[dict, dict]:
+    """Resolve selected values and option pools for the existing checker."""
+    captioning_cfg = config.get("captioning") or {}
+    template_cfg = captioning_cfg.get("template")
+    if template_cfg is not None:
+        selected_variables = _captioning_selections(config, sample)
+        catalogs = template_cfg.get("attributes") or {}
+        variable_options = {}
+        for variable_name, selected_value in selected_variables.items():
+            catalog = catalogs.get(variable_name)
+            variable_options[variable_name] = (
+                list(catalog) if isinstance(catalog, dict) else [selected_value]
+            )
+        return selected_variables, variable_options
+
+    llm_cfg = captioning_cfg.get("llm") or {}
+    variables = llm_cfg.get("variables") or {}
+    verification_values = llm_cfg.get("verification_values")
+    selected_variables = _first_values(
+        verification_values if verification_values is not None else variables
+    )
+    verification_options = llm_cfg.get("verification_options")
+    variable_options = (
+        verification_options if verification_options is not None else variables
+    )
+    return selected_variables, variable_options
+
+
+def _common_message_prefix(message_lists: list) -> list:
+    """Longest run of leading chat turns identical across every call.
+
+    A stage that calls repeatedly resends the same system turn each time; only
+    the user turn carries the per-call question. Hoisting the shared prefix
+    keeps the system prompt in the record exactly once.
+    """
+    if not message_lists or not all(isinstance(m, list) for m in message_lists):
+        return []
+    prefix = []
+    for turns in zip(*message_lists):
+        if any(turn != turns[0] for turn in turns[1:]):
+            break
+        prefix.append(turns[0])
+    return prefix
+
+
+def _fold_repeated_request_fields(requests: list) -> tuple:
+    """Split ``requests`` into ``(shared, per_call)``.
+
+    A multi-call stage resends its whole configuration on every call — model,
+    sampling params, the response schema, the system prompt — so recording each
+    call verbatim repeats kilobytes that never change. Everything identical
+    across all calls moves to ``shared``; each entry keeps only what differed.
+    Returns ``(None, requests)`` unchanged when there is nothing to fold.
+    """
+    if len(requests) < 2 or not all(isinstance(item, dict) for item in requests):
+        return None, requests
+
+    first = requests[0]
+    shared = {
+        key: value
+        for key, value in first.items()
+        if key != "messages"
+        and all(key in other and other[key] == value for other in requests[1:])
+    }
+    prefix = _common_message_prefix([item.get("messages") for item in requests])
+    if prefix:
+        shared["messages"] = prefix
+
+    per_call = []
+    for item in requests:
+        rest = {key: value for key, value in item.items() if key not in shared}
+        if prefix:
+            rest["messages"] = (item.get("messages") or [])[len(prefix) :]
+        per_call.append(rest)
+    return (shared or None), per_call
+
+
+def _endpoint_record(adapter, stage: str | None = None) -> dict | None:
+    """Describe the endpoint an adapter is bound to, or ``None`` if there is none.
+
+    Reads the adapter rather than the config so the record shows the endpoint
+    that actually served the call, including a URL an env override redirected
+    (``VLM_ENDPOINT_URL`` and friends apply to captioning/evaluator consumers).
+
+    ``requests`` carries the wire body of every successful call this stage made
+    for the sample, media elided — for a chat stage those are the system and
+    user prompts that produced the caption or the judgements. Whatever every
+    call sent identically (model, sampling params, response schema, the system
+    turn) is hoisted to ``request_shared`` so it appears once; each ``requests``
+    entry keeps only what differed. ``calls`` is the true call count, which
+    exceeds ``len(requests)`` when a stage ran past ``MAX_RECORDED_REQUESTS``.
+    """
+    if adapter is None:
+        return None
+
+    endpoint = getattr(adapter, "endpoint", None)
+    try:
+        contract = effective_adapter(endpoint) if endpoint is not None else None
+    except ValueError:
+        contract = None
+
+    record = {"stage": stage} if stage else {}
+    record.update(
+        {
+            "id": getattr(endpoint, "id", None),
+            "role": getattr(adapter, "role", None) or getattr(endpoint, "role", None),
+            # request_url is the concrete route every adapter POSTs to.
+            "url": getattr(adapter, "request_url", None)
+            or getattr(adapter, "url", None),
+            "adapter": contract,
+            "model": getattr(adapter, "model", None),
+            "timeout": getattr(adapter, "timeout", None),
+        }
+    )
+    requests = list(getattr(adapter, "recorded_requests", None) or [])
+    if requests:
+        shared, per_call = _fold_repeated_request_fields(requests)
+        # The wire body repeats the endpoint's own model on every call; keep it
+        # only where it differs. Applied to both shapes so a one-call stage and
+        # a many-call stage of the same config report the same fields — and
+        # keyed on presence, since a single-model NIM sends no model at all and
+        # `None == None` would otherwise pop a key that was never there.
+        if shared and shared.get("model") == record["model"]:
+            shared.pop("model", None)
+        per_call = [
+            {
+                k: v
+                for k, v in item.items()
+                if not (k == "model" and v == record["model"])
+            }
+            if isinstance(item, dict)
+            else item
+            for item in per_call
+        ]
+        if shared:
+            record["request_shared"] = shared
+        record["requests"] = per_call
+        # Always report the true call count, so a capped list can't be mistaken
+        # for the complete set.
+        record["calls"] = getattr(adapter, "recorded_call_count", len(requests))
+    return record
+
+
+def _generator_adapter(generator):
+    """Return the adapter a generator calls through (direct or via executor)."""
+    return getattr(generator, "adapter", None) or getattr(
+        getattr(generator, "executor", None), "adapter", None
+    )
+
+
+def _pipeline_stages(captioner, generator, attribute_verifier, vlm_verifier=None):
+    """``(stage, adapter)`` for every endpoint this run is wired to, in order.
+
+    Shared by the metadata record and the per-sample reset so the two can never
+    walk different sets of adapters.
+    """
+    stages = []
+
+    # Captioning: a composite captioner holds one sub-captioner per role; a
+    # single-model one holds the adapter directly. Text/file captioners call
+    # nothing and contribute no endpoint.
+    if captioner is not None:
+        for attribute, stage in (
+            ("vlm_captioner", "captioning.vlm"),
+            ("llm_captioner", "captioning.llm"),
+        ):
+            part = getattr(captioner, attribute, None)
+            if part is not None:
+                stages.append((stage, getattr(part, "adapter", None)))
+        # Gate on whether an adapter was actually found, not on whether `stages`
+        # is non-empty: a sub-captioner that exposes no adapter appends a None
+        # that gets filtered out later, so testing the list alone would skip
+        # this fallback and leave the run with no captioning record at all.
+        if not any(adapter is not None for _stage, adapter in stages):
+            adapter = getattr(captioner, "adapter", None)
+            if adapter is not None:
+                role = getattr(adapter, "role", None) or "model"
+                stages.append((f"captioning.{role}", adapter))
+
+    stages.append(("generation", _generator_adapter(generator)))
+
+    if attribute_verifier is not None:
+        stages.append(
+            (
+                "attribute_verification.question_generation",
+                getattr(
+                    getattr(attribute_verifier, "question_generator", None),
+                    "adapter",
+                    None,
+                ),
+            )
+        )
+        stages.append(
+            (
+                "attribute_verification.vlm_verification",
+                getattr(
+                    getattr(attribute_verifier, "vlm_verifier", None), "adapter", None
+                ),
+            )
+        )
+    elif vlm_verifier is not None:
+        # Standalone vlm_verification evaluator (no attribute verification).
+        stages.append(("vlm_verification", getattr(vlm_verifier, "adapter", None)))
+
+    return stages
+
+
+def _reset_request_records(captioner, generator, attribute_verifier, vlm_verifier=None):
+    """Clear each adapter's recorded requests before a sample.
+
+    Adapters are built once and reused for every sample, so without this a
+    sample's metadata would carry the previous sample's calls too.
+    """
+    for _stage, adapter in _pipeline_stages(
+        captioner, generator, attribute_verifier, vlm_verifier
+    ):
+        reset = getattr(adapter, "reset_requests", None)
+        if callable(reset):
+            reset()
+
+
+def _pipeline_endpoints(
+    captioner,
+    generator,
+    attribute_verifier,
+    vlm_verifier=None,
+    generation_seconds: float | None = None,
+) -> list:
+    """Every inference endpoint this run is *wired to*, in pipeline order.
+
+    Captioning and evaluation call their own endpoints, so recording only the
+    generation endpoint would leave most of the run unattributed — the caption
+    that conditioned the output, and the judgements that passed it, each came
+    from a model worth naming.
+
+    This reflects wiring, not call history: a stage that was configured but
+    skipped for this sample (a reused caption file, verification never reached)
+    still appears, with no ``requests``.
+    """
+    records = []
+    for stage, adapter in _pipeline_stages(
+        captioner, generator, attribute_verifier, vlm_verifier
+    ):
+        record = _endpoint_record(adapter, stage)
+        if record is None:
+            continue
+        if stage == "generation" and generation_seconds is not None:
+            record["duration_seconds"] = generation_seconds
+        records.append(record)
+    return records
+
+
+# Captioner class -> the strategy name the config selected it with. Keeps the
+# metadata readable without making the reader map class names back to config.
+_CAPTIONER_STRATEGIES = {
+    "TextCaptioner": "text",
+    "FileCaptioner": "file",
+    "TemplateCaptioner": "template",
+    "VLMLLMCaptioner": "vlm+llm",
+    "VLMCaptioner": "vlm",
+    "LLMCaptioner": "llm",
+}
+
+
+def _captioning_provenance(captioner) -> dict:
+    """How this run's prompt was built.
+
+    A text/template captioner calls no endpoint, so it contributes nothing to
+    the endpoint records — yet it is what produced the prompt. Without the
+    template, metadata shows the rendered result and the substituted values but
+    not the string that combined them, so two runs off different templates are
+    indistinguishable after the fact.
+    """
+    if captioner is None:
+        return {}
+
+    name = type(captioner).__name__
+    record = {"strategy": _CAPTIONER_STRATEGIES.get(name, name)}
+    template = getattr(captioner, "template", None)
+    if isinstance(template, str) and template:
+        record["template"] = template
+    return record
+
+
+def _prompt_builder_provenance(captioner) -> dict:
+    """Expose compact metadata only for a completed VLM-template build."""
+    if getattr(captioner, "last_prompt_builder", None) != "vlm_template":
+        return {}
+
+    return {
+        "prompt_builder": "vlm_template",
+        "scene_description": getattr(captioner, "last_scene_description", None),
+        "scene_description_source": getattr(
+            captioner, "last_scene_description_source", None
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -247,14 +608,18 @@ def main():
             conf = OmegaConf.create(base_config)
             OmegaConf.set_struct(conf, False)
             if unknown_args:
-                logger.info(f"Applying CLI overrides: {unknown_args}")
+                # Redact secret-like overrides (e.g. *.api_key=...) so a key
+                # passed on the CLI never lands in the logs.
+                logger.info(f"Applying CLI overrides: {redact_overrides(unknown_args)}")
                 conf.merge_with_dotlist(unknown_args)
             config_dict = OmegaConf.to_container(conf, resolve=True)
     except Exception as e:
         logger.error(
             f"Failed to read config file {args.config} or apply overrides: {e}"
         )
-        return
+        # Exit non-zero: nothing ran, so a bare `return` would report success to
+        # CI/batch callers for a config that was never even loaded.
+        sys.exit(1)
 
     validate_environment(logger)
 
@@ -263,7 +628,7 @@ def main():
         logger.error(
             "Configuration validation failed. Please fix the configuration file."
         )
-        return
+        sys.exit(1)
 
     # For convenience keep a plain dict view for sections that still need it
     config = config_dict
@@ -278,30 +643,25 @@ def main():
             logger.info("Captioner initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize captioner: {e}")
-            return
+            sys.exit(1)
 
     # ---- Initialize evaluators ----
-    hallucination_checker, attribute_verifier, av_config_obj = _init_evaluators(
-        config, logger
-    )
+    (
+        hallucination_checker,
+        attribute_verifier,
+        av_config_obj,
+        standalone_vlm_verifier,
+    ) = _init_evaluators(config, logger)
 
     # ---- Initialize generator ----
     generator = None
     if config.get("augmentation"):
-        model_name = config["augmentation"]["model"]["name"]
-        executor_type = config["augmentation"]["model"].get("executor_type", "local")
         try:
             generator = create_generator(config, logger)
-        except ModuleNotFoundError:
-            if "cosmos" in model_name and executor_type == "local":
-                logger.error(
-                    "COSMOS local execution is not supported in this environment. "
-                    "Please run with cosmos local dependencies or use a different executor."
-                )
-                logger.debug("Import error while creating generator", exc_info=True)
-                return
-            raise
-        logger.info("Generator initialized successfully")
+            logger.info("Generator initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize generator: {e}")
+            sys.exit(1)
 
     overwrite_caption = os.getenv("OVERWRITE_CAPTION", "true")
 
@@ -315,6 +675,10 @@ def main():
     # ---- Process samples ----
     for sample in data_samples:
         logger.info("=" * 80)
+        # Adapters are reused across samples; start each one's provenance clean.
+        _reset_request_records(
+            captioner, generator, attribute_verifier, standalone_vlm_verifier
+        )
         sample_inputs = sample.get("inputs") or {}
         rgb_path = sample_inputs.get("rgb") if isinstance(sample_inputs, dict) else None
         logger.info(f"Processing sample: {rgb_path or 'N/A (text2world)'}")
@@ -327,9 +691,37 @@ def main():
 
             output_media_path = sample["output"]["video"]
 
+            # ---- Preprocessing: input resize (optional) ----
+            # Resize feeds GENERATION only (gen_input_path). The ORIGINAL input
+            # (rgb_path) stays the reference for alignment, captioning, and the
+            # hallucination check — so alignment registers the output back to the
+            # TRUE input frame (small reference -> fast, output in the original
+            # frame). Useful for routes that edit at the input resolution (e.g.
+            # openai.images.edits). CPU-only (cv2), so it never imports cupy.
+            gen_input_path = rgb_path
+            _dp_model = pipeline_config.data_processing
+            _prep_model = _dp_model.preprocessing if _dp_model else None
+            _resize_cfg = _prep_model.resize if _prep_model else None
+            if _resize_cfg is not None and _resize_cfg.enabled and rgb_path:
+                try:
+                    from data_processing import resize_input
+
+                    resized_input_path = os.path.join(
+                        os.path.dirname(output_media_path), "_resized_input.png"
+                    )
+                    logger.info("Running preprocessing: input resize...")
+                    resize_input(
+                        rgb_path, resized_input_path, _resize_cfg.model_dump(), logger
+                    )
+                    gen_input_path = resized_input_path
+                except Exception as e:
+                    logger.error(f"Input resize failed for {rgb_path}: {e}")
+                    continue
+
             prompt = None
             control_inputs = {}
             natural_caption_from_vlm = None
+            gen_elapsed = None
 
             # ---- Captioning ----
             caption_exists = msc.is_file(sample["output"]["caption"])
@@ -351,6 +743,9 @@ def main():
                     continue
             else:
                 prompt = caption_content
+                reset_provenance = getattr(captioner, "reset_provenance", None)
+                if callable(reset_provenance):
+                    reset_provenance()
                 logger.debug("Using existing prompt from file")
 
             # ---- Generation + Verification retry loop ----
@@ -466,10 +861,10 @@ def main():
                     # Generate, re-calling the endpoint on failure up to the
                     # pipeline.retry budget. Each call is bounded by request_timeout,
                     # which is also the exponential-backoff base between retries.
-                    success, output_path, gen_elapsed = generate_with_retries(
+                    success, output_path, attempt_elapsed = generate_with_retries(
                         generator,
                         prompt,
-                        rgb_path,
+                        gen_input_path,
                         control_inputs,
                         output_media_path,
                         max_retries,
@@ -481,7 +876,13 @@ def main():
                             f"Generation failed after {max_retries + 1} attempt(s) "
                             f"-> {output_media_path}"
                         )
+                        # Leave gen_elapsed on the attempt that produced the
+                        # retained output: generate_with_retries reports its
+                        # final attempt's elapsed whether or not it succeeded,
+                        # and an evaluator retry that fails here does not
+                        # replace the output an earlier attempt wrote.
                         break
+                    gen_elapsed = attempt_elapsed
                     models_fetched = True
                     generation_succeeded = True
                     sample["output"]["video"] = output_path
@@ -552,26 +953,8 @@ def main():
                         print()
                         logger.info("Running attribute verification...")
                         try:
-                            llm_cfg = (config.get("captioning") or {}).get("llm") or {}
-                            variables = llm_cfg.get("variables") or {}
-                            verification_values = llm_cfg.get("verification_values")
-                            verification_options = llm_cfg.get("verification_options")
-
-                            if verification_values is not None:
-                                selected_variables = {
-                                    k: (v[0] if isinstance(v, list) and v else v)
-                                    for k, v in verification_values.items()
-                                }
-                            else:
-                                selected_variables = {
-                                    k: (v[0] if isinstance(v, list) and v else v)
-                                    for k, v in variables.items()
-                                }
-
-                            variable_options = (
-                                verification_options
-                                if verification_options is not None
-                                else variables
+                            selected_variables, variable_options = (
+                                _attribute_verification_inputs(config, sample)
                             )
                             exclude_variables = set(
                                 (av_config_obj or {}).get("exclude_variables") or []
@@ -605,6 +988,10 @@ def main():
                                 "attempt": attempt + 1,
                                 "seed_used": current_seed,
                             }
+                            if exclude_variables:
+                                verification_results["excluded_variables"] = sorted(
+                                    exclude_variables
+                                )
 
                             if passed_attr:
                                 # Natural caption generation on pass
@@ -685,6 +1072,42 @@ def main():
                 logger.error(f"Sample failed: {rgb_path or 'unknown'}")
                 continue
 
+            # ---- Did the configured evaluators ultimately pass? ----
+            # Generation can succeed while an evaluator (hallucination or
+            # attribute verification) fails after exhausting its retries — e.g.
+            # the LLM question generator can't be reached. Under
+            # pipeline.evaluation.strict (default True) that is a FAILED sample:
+            # it must NOT be counted as processed, so the run exits non-zero and
+            # is never reported "complete". retain_failures (default True) keeps
+            # the output files for inspection; when False they are discarded.
+            eval_settings = pipeline_config.pipeline.evaluation
+            evaluation_passed = True
+            if generator is not None:
+                if hallucination_enabled:
+                    evaluation_passed = passed_hallucination_check
+                if verification_enabled and evaluation_passed:
+                    evaluation_passed = bool(
+                        verification_results and verification_results.get("passed")
+                    )
+            sample_failed = eval_settings.strict and not evaluation_passed
+            if sample_failed and not eval_settings.retain_failures:
+                logger.error(
+                    "Evaluation failed (retain_failures=False) — discarding "
+                    f"output for: {rgb_path or 'unknown'}"
+                )
+                for _discard in (
+                    sample["output"].get("video"),
+                    sample["output"].get("caption"),
+                    sample["output"].get("metadata"),
+                    sample["output"].get("evaluation"),
+                ):
+                    try:
+                        if _discard and msc.is_file(_discard):
+                            msc.delete(_discard)
+                    except Exception as _del_err:
+                        logger.debug(f"Could not delete {_discard}: {_del_err}")
+                continue
+
             # ---- Data processing (alignment, ...) ----
             alignment_params = None
             dp_model = pipeline_config.data_processing
@@ -698,6 +1121,11 @@ def main():
                     logger.warning("Skipping alignment: no reference (rgb) input")
                 else:
                     logger.info("Running data processing: alignment...")
+                    # Imported lazily: alignment is GPU-only (cupy), which the
+                    # endpoint-only slim image does not ship. Endpoint runs that
+                    # don't configure alignment never import it.
+                    from data_processing import run_alignment
+
                     alignment_params = run_alignment(
                         ref_path=rgb_path,
                         align_path=sample["output"]["video"],
@@ -706,16 +1134,48 @@ def main():
                         logger=logger,
                     )
 
+            # ---- Data processing: transcode ----
+            # The generated bitstream is whatever the model endpoint returned,
+            # so without this the output codec varies by model. Image outputs
+            # are skipped inside transcode_video.
+            transcode_results = None
+            transcode_model = dp_model.transcode if dp_model else None
+            if transcode_model is not None:
+                if not generation_succeeded:
+                    # Only reachable with no generator configured (a generator
+                    # that failed already `continue`d above), so nothing was
+                    # written to normalize.
+                    logger.warning(
+                        "Skipping transcode: no generator configured, nothing generated"
+                    )
+                elif sample_failed:
+                    # Retained only for inspection (retain_failures), not shipped
+                    # as a dataset artifact -- don't spend a re-encode on it.
+                    logger.warning(
+                        "Skipping transcode: sample failed evaluation "
+                        "(output retained for inspection)"
+                    )
+                else:
+                    from data_processing import transcode_video
+
+                    transcode_results = transcode_video(
+                        src_path=sample["output"]["video"],
+                        dest_path=sample["output"]["video"],
+                        config=transcode_model.model_dump(),
+                        logger=logger,
+                    )
+                    if transcode_results.get("error"):
+                        # Not fatal (the generated video is still valid), but the
+                        # single-codec guarantee does not hold for this sample.
+                        logger.warning(
+                            "Output was NOT normalized to "
+                            f"{transcode_results.get('target_codec')}: "
+                            f"{transcode_results['error']}"
+                        )
+
             # ---- Write metadata ----
             try:
-                llm_cfg = (config.get("captioning") or {}).get("llm") or {}
-                metadata_selections = (
-                    llm_cfg.get("verification_values") or llm_cfg.get("variables") or {}
-                )
-                metadata_selections = {
-                    k: (v[0] if isinstance(v, list) and v else v)
-                    for k, v in metadata_selections.items()
-                }
+                metadata_selections = _captioning_selections(config, sample)
 
                 metadata = {
                     "prompt": prompt,
@@ -725,6 +1185,21 @@ def main():
                     "input_media_path": rgb_path,
                     "control_media": control_inputs,
                 }
+                metadata.update(_prompt_builder_provenance(captioner))
+                captioning_record = _captioning_provenance(captioner)
+                if captioning_record:
+                    metadata["captioning"] = captioning_record
+                # Per sample, not hoisted: each entry carries that sample's own
+                # requests (prompts, seed) and the generation timing.
+                endpoint_records = _pipeline_endpoints(
+                    captioner,
+                    generator,
+                    attribute_verifier,
+                    standalone_vlm_verifier,
+                    gen_elapsed,
+                )
+                if endpoint_records:
+                    metadata["endpoints"] = endpoint_records
                 if hallucination_results is not None:
                     metadata["hallucination_check"] = hallucination_results
                 if verification_results is not None:
@@ -733,6 +1208,8 @@ def main():
                     metadata["natural_caption"] = natural_caption_from_vlm
                 if alignment_params:
                     metadata["alignment"] = alignment_params
+                if transcode_results is not None:
+                    metadata["transcode"] = transcode_results
 
                 with msc.open(sample["output"]["metadata"], "w") as f:
                     json.dump(metadata, f, indent=2)
@@ -761,6 +1238,15 @@ def main():
                 continue
 
             logger.info("=" * 80)
+            # A strict evaluator failure (output retained above) is NOT a
+            # completed sample: skip the success count so the final tally exits
+            # non-zero and the task is not marked complete.
+            if sample_failed:
+                logger.error(
+                    "Sample evaluation FAILED (output retained for inspection): "
+                    f"{rgb_path or 'unknown'}"
+                )
+                continue
             samples_processed += 1
             tracker.update(
                 percent=(samples_processed / total_samples) * 100,

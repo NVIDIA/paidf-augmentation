@@ -18,8 +18,10 @@ Usage:
 """
 
 import argparse
+import ast
 import json
 import logging
+import math
 import random
 import sys
 import os
@@ -292,20 +294,32 @@ def load_workflow_config(config_path: str, logger: logging.Logger) -> Dict[str, 
             logger.error(f"Failed to parse workflow config: {e}")
             raise
 
+    workflow_type = config.get("workflow_type")
+
     # Validate required fields
-    required_fields = [
-        "data_dir",
-        "n_augmentations",
-        "config_output",
-        "example_augmentation_config",
-        "variables",
-    ]
+    if workflow_type == "seed_image_gen_t2i":
+        required_fields = [
+            "env_type",
+            "n_augmentations",
+            "config_output",
+            "example_augmentation_config",
+            "output_root",
+        ]
+    else:
+        required_fields = [
+            "data_dir",
+            "n_augmentations",
+            "config_output",
+            "example_augmentation_config",
+            "variables",
+        ]
     for field in required_fields:
         if field not in config:
             raise ValueError(f"Missing required field in workflow config: {field}")
 
     workflow_dir = _parent_path(config_path)
-    config["data_dir"] = _normalize_path(config["data_dir"], base_dir=workflow_dir)
+    if "data_dir" in config:
+        config["data_dir"] = _normalize_path(config["data_dir"], base_dir=workflow_dir)
     config["config_output"] = _normalize_path(
         config["config_output"], base_dir=workflow_dir
     )
@@ -318,10 +332,14 @@ def load_workflow_config(config_path: str, logger: logging.Logger) -> Dict[str, 
         )
 
     logger.info("Workflow config loaded successfully")
-    logger.info(f"  Data directory: {config['data_dir']}")
+    if "data_dir" in config:
+        logger.info(f"  Data directory: {config['data_dir']}")
+    if workflow_type == "seed_image_gen_t2i":
+        logger.info(f"  Environment type: {config['env_type']}")
     logger.info(f"  Augmentations per video: {config['n_augmentations']}")
     logger.info(f"  Output directory: {config['config_output']}")
-    logger.info(f"  Variables: {list(config['variables'].keys())}")
+    if "variables" in config:
+        logger.info(f"  Variables: {list(config['variables'].keys())}")
     if config.get("conditional_variables"):
         logger.info(
             f"  Conditional variables: {list(config['conditional_variables'].keys())}"
@@ -390,23 +408,67 @@ def parse_distribution(dist_config: Any, logger: logging.Logger) -> Dict[str, fl
     """
     Parse distribution configuration and normalize probabilities.
 
-    Expects dict format:
+    Expects a mapping of category -> probability, either as a native dict or as a
+    string containing only a Python/YAML-style dict literal, e.g.:
         {"clear": 0.5, "cloudy": 0.25, "rainy": 0.25}
+
+    String values are parsed with ``ast.literal_eval`` (literals only). Calls,
+    imports, and attribute access are rejected so workflow YAML cannot execute
+    arbitrary code through this path.
     """
     if isinstance(dist_config, dict):
-        distribution = dist_config
+        distribution: Any = dist_config
     elif isinstance(dist_config, str):
         try:
-            # Try to evaluate as Python dict
-            distribution = eval(dist_config)
-        except Exception as e:
+            distribution = ast.literal_eval(dist_config)
+        # literal_eval raises ValueError/SyntaxError on non-literals, and can raise
+        # TypeError/MemoryError/RecursionError on pathological input.
+        except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError) as e:
             logger.error(f"Failed to parse distribution string: {dist_config}")
-            raise ValueError(f"Invalid distribution format: {e}")
+            raise ValueError(f"Invalid distribution format: {e}") from e
     else:
         raise ValueError(f"Invalid distribution type: {type(dist_config)}")
 
+    if not isinstance(distribution, dict):
+        raise ValueError(
+            "Invalid distribution format: expected a mapping of "
+            f"str -> number, got {type(distribution).__name__}"
+        )
+    if not distribution:
+        raise ValueError("Invalid distribution format: distribution must be non-empty")
+
+    for key, value in distribution.items():
+        if not isinstance(key, str):
+            raise ValueError(
+                "Invalid distribution format: keys must be strings, "
+                f"got {type(key).__name__}"
+            )
+        # bool is a subclass of int; reject it explicitly for probabilities.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(
+                "Invalid distribution format: probabilities must be numbers, "
+                f"got {type(value).__name__} for key {key!r}"
+            )
+        # NaN/inf survive the comparisons below and normalize to NaN, so reject them
+        # here rather than failing later inside random.choices().
+        if not math.isfinite(value):
+            raise ValueError(
+                "Invalid distribution format: probabilities must be finite, "
+                f"got {value} for key {key!r}"
+            )
+        if value < 0:
+            raise ValueError(
+                "Invalid distribution format: probabilities must be non-negative, "
+                f"got {value} for key {key!r}"
+            )
+
     # Normalize probabilities to sum to 1.0
     total = sum(distribution.values())
+    if not math.isfinite(total) or total <= 0:
+        raise ValueError(
+            "Invalid distribution format: probabilities must sum to a positive, "
+            f"finite value, got {total}"
+        )
     if abs(total - 1.0) > 0.01:
         logger.warning(
             f"Distribution probabilities sum to {total:.3f}, normalizing to 1.0"
@@ -711,6 +773,7 @@ def generate_output_paths(
     data_dir: str,
     base_output_name: str = "output",
     output_root: Optional[str] = None,
+    output_extension: Optional[str] = None,
 ) -> Dict[str, str]:
     """
     Generate output paths for augmented media (image or video).
@@ -723,21 +786,57 @@ def generate_output_paths(
         {root}/{media_stem}/aug_{index}/output_prompt.txt
         {root}/{media_stem}/aug_{index}/output_metadata.json
 
-    The output file will have the same extension as the input media.
+    By default, the output file has the same extension as the input media.
+    Set output_extension for workflows that change media type, such as
+    image-to-video generation.
     """
     media_stem = _path_stem(media_path)
     media_dir = _path_parent(media_path)
-    media_ext = _path_suffix(media_path)
+    media_ext = output_extension or _path_suffix(media_path)
 
     # Create augmentation subdirectory under output_root or next to media
     base = output_root if output_root is not None else media_dir
     aug_subdir = _join_path(base, media_stem, f"aug_{aug_index}")
 
     return {
-        "media": _join_path(aug_subdir, f"{base_output_name}{media_ext}"),
+        "video": _join_path(aug_subdir, f"{base_output_name}{media_ext}"),
         "caption": _join_path(aug_subdir, f"{base_output_name}_prompt.txt"),
         "metadata": _join_path(aug_subdir, f"{base_output_name}_metadata.json"),
     }
+
+
+def _is_image_to_video_config(config: Dict[str, Any], media_path: str) -> bool:
+    """Return whether this config generates video from an image input."""
+    if not is_image(str(media_path)):
+        return False
+
+    model_config = config.get("augmentation", {}).get("model", {})
+    model_name = str(model_config.get("name", "")).lower()
+    return "image2video" in model_name or "image-to-video" in model_name
+
+
+def _slugify_name(value: str) -> str:
+    """Create a stable path-friendly name from a user-facing label."""
+    slug = "".join(c.lower() if c.isalnum() else "_" for c in str(value)).strip("_")
+    while "__" in slug:
+        slug = slug.replace("__", "_")
+    return slug or "item"
+
+
+def _set_dotted_path(config: Dict[str, Any], dotted_path: str, value: Any) -> None:
+    """Set a nested dictionary/list value using a simple dot path."""
+    current: Any = config
+    parts = str(dotted_path).split(".")
+    for part in parts[:-1]:
+        if isinstance(current, list):
+            current = current[int(part)]
+        else:
+            current = current.setdefault(part, {})
+    last = parts[-1]
+    if isinstance(current, list):
+        current[int(last)] = value
+    else:
+        current[last] = value
 
 
 def generate_seed(media_path: str, aug_index: int, base_seed: int = 42) -> int:
@@ -802,8 +901,13 @@ def create_augmentation_config(
     data_entry["inputs"]["rgb"] = _to_external_storage_path(str(media_path), logger)
 
     # Update output paths (under output_root if set, else next to media)
+    is_image_to_video = _is_image_to_video_config(config, media_path)
     output_paths = generate_output_paths(
-        media_path, aug_index, data_dir, output_root=output_root
+        media_path,
+        aug_index,
+        data_dir,
+        output_root=output_root,
+        output_extension=".mp4" if is_image_to_video else None,
     )
     output_paths = {
         key: _to_external_storage_path(value, logger)
@@ -856,8 +960,7 @@ def create_augmentation_config(
             or "verification_options" in captioning_config
         ):
             captioning_config["verification_values"] = {
-                var_name: [base_value]
-                for var_name, base_value in base_to_write.items()
+                var_name: [base_value] for var_name, base_value in base_to_write.items()
             }
             logger.debug("  Set captioning.verification_values (base) for MCQ")
 
@@ -869,7 +972,9 @@ def create_augmentation_config(
                 config["template_generation"]["variables"][var_name] = [sampled_value]
                 logger.debug(f"  Set {var_name} = {sampled_value}")
             else:
-                logger.warning(f"Variable '{var_name}' not found in example config, skipping")
+                logger.warning(
+                    f"Variable '{var_name}' not found in example config, skipping"
+                )
 
         # Write base values for MCQ verification (main colors/options, not fine-grained variants)
         if base_to_write is not None:
@@ -889,21 +994,31 @@ def create_augmentation_config(
         config["cosmos"]["parameters"]["seed"] = seed
         # Update inference name to be unique
         media_stem = _path_stem(media_path)
-        config["cosmos"]["parameters"]["inference_name"] = f"{media_stem}_aug{aug_index}"
+        config["cosmos"]["parameters"]["inference_name"] = (
+            f"{media_stem}_aug{aug_index}"
+        )
 
     # Update seeds for new generation format
     if "generation" in config:
         generation_type = config["generation"].get("type")
 
         # Update cosmos_transfer seeds
-        if generation_type == "cosmos_transfer" and "cosmos_transfer" in config["generation"]:
+        if (
+            generation_type == "cosmos_transfer"
+            and "cosmos_transfer" in config["generation"]
+        ):
             if "parameters" in config["generation"]["cosmos_transfer"]:
                 config["generation"]["cosmos_transfer"]["parameters"]["seed"] = seed
                 media_stem = _path_stem(media_path)
-                config["generation"]["cosmos_transfer"]["parameters"]["inference_name"] = f"{media_stem}_aug{aug_index}"
+                config["generation"]["cosmos_transfer"]["parameters"][
+                    "inference_name"
+                ] = f"{media_stem}_aug{aug_index}"
 
         # Update qwen_image_edit seeds
-        elif generation_type == "qwen_image_edit" and "qwen_image_edit" in config["generation"]:
+        elif (
+            generation_type == "qwen_image_edit"
+            and "qwen_image_edit" in config["generation"]
+        ):
             if "parameters" in config["generation"]["qwen_image_edit"]:
                 config["generation"]["qwen_image_edit"]["parameters"]["seed"] = seed
 
@@ -944,6 +1059,95 @@ def save_config(
     return config_path
 
 
+def create_seed_image_t2i_config(
+    example_config: Dict[str, Any],
+    workflow_config: Dict[str, Any],
+    aug_index: int,
+    logger: logging.Logger,
+) -> Dict[str, Any]:
+    """Create a T2I seed-image runtime config from an environment workflow."""
+    import copy
+
+    config = copy.deepcopy(example_config)
+
+    env_type = str(workflow_config["env_type"])
+    env_description = str(workflow_config.get("env_description", env_type))
+    env_slug = _slugify_name(env_type)
+    output_root = workflow_config["output_root"]
+    output_basename = str(workflow_config.get("output_basename", "seed_image"))
+    seed_base = int(workflow_config.get("seed_base", 42))
+
+    data_config = config.get("data")
+    if isinstance(data_config, dict):
+        data_config = [data_config]
+    if not data_config:
+        raise ValueError(
+            "Example config must have 'data' section with at least one entry"
+        )
+    data_entry = data_config[0]
+
+    output_template = data_entry.get("output", {}).get("video", "")
+    output_ext = _path_suffix(output_template) or ".png"
+    output_name = output_basename
+    if not _path_suffix(output_name):
+        output_name = f"{output_name}{output_ext}"
+
+    output_dir = _join_path(output_root, env_slug, f"aug_{aug_index}")
+    data_entry.setdefault("inputs", {})["rgb"] = None
+    data_entry.setdefault("output", {}).update(
+        {
+            "video": _join_path(output_dir, output_name),
+            "caption": _join_path(output_dir, f"{_path_stem(output_name)}_prompt.txt"),
+            "metadata": _join_path(
+                output_dir, f"{_path_stem(output_name)}_metadata.json"
+            ),
+        }
+    )
+
+    variables = {
+        "env_type": [env_type],
+        "env_description": [env_description],
+    }
+    variation_instructions = workflow_config.get("variation_instructions") or []
+    if variation_instructions:
+        variables["variation_instruction"] = [
+            variation_instructions[aug_index % len(variation_instructions)]
+        ]
+
+    llm_config = config.setdefault("captioning", {}).setdefault("llm", {})
+    llm_config["variables"] = variables
+
+    _set_dotted_path(config, "augmentation.parameters.seed", seed_base + aug_index)
+    for dotted_path, value in (workflow_config.get("runtime_overrides") or {}).items():
+        _set_dotted_path(config, dotted_path, value)
+
+    ctx = config.setdefault("runtime_context", {})
+    ctx["env_type"] = env_type
+    ctx["aug_index"] = aug_index
+
+    logger.debug("  T2I seed config %d variables: %s", aug_index, variables)
+    return config
+
+
+def save_named_config(
+    config: Dict[str, Any],
+    output_dir: str,
+    config_filename: str,
+    logger: logging.Logger,
+) -> str:
+    """Save augmentation config to a specific YAML filename."""
+    config_path = _join_path(output_dir, config_filename)
+
+    if not is_remote_path(output_dir):
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    with msc.open(config_path, "w") as f:
+        yaml.dump(config, f, default_flow_style=False, sort_keys=False, width=120)
+
+    logger.debug(f"Saved config to {config_path}")
+    return config_path
+
+
 def generate_configs(
     workflow_config: Dict[str, Any],
     logger: logging.Logger,
@@ -966,18 +1170,45 @@ def generate_configs(
             "workflow config has no 'config_output' (output directory). "
             "Add config_output: <path> at the top level of your YAML."
         )
-    data_dir = workflow_config["data_dir"]
+    workflow_type = workflow_config.get("workflow_type")
     n_augmentations = int(workflow_config["n_augmentations"])
     config_output = workflow_config["config_output"]
     output_root = workflow_config.get("output_root")
     if output_root is not None:
         logger.info(f"Output root for augmented media: {output_root}")
     example_config_path = workflow_config["example_augmentation_config"]
-    variables_config = workflow_config["variables"]
-    conditional_config = workflow_config.get("conditional_variables") or {}
 
     # Load example config
     example_config = load_example_config(example_config_path, logger)
+
+    if workflow_type == "seed_image_gen_t2i":
+        env_slug = _slugify_name(workflow_config["env_type"])
+        total_configs = n_augmentations
+        logger.info(f"Will generate {total_configs} seed-image config(s)")
+
+        if dry_run:
+            logger.info("DRY RUN MODE - No files will be written")
+
+        generated_configs = []
+        for aug_idx in range(n_augmentations):
+            config = create_seed_image_t2i_config(
+                example_config, workflow_config, aug_idx, logger
+            )
+            if not dry_run:
+                config_path = save_named_config(
+                    config,
+                    config_output,
+                    f"config_{env_slug}_aug{aug_idx}.yaml",
+                    logger,
+                )
+                generated_configs.append(config_path)
+            else:
+                generated_configs.append(f"DRY_RUN_config_{env_slug}_aug{aug_idx}.yaml")
+        return generated_configs
+
+    data_dir = workflow_config["data_dir"]
+    variables_config = workflow_config["variables"]
+    conditional_config = workflow_config.get("conditional_variables") or {}
 
     # Discover media files (images and videos)
     media_files = discover_media(data_dir, logger)

@@ -1,0 +1,235 @@
+data:
+  - inputs:
+      rgb: "/workspace/data/input.png"        # mounted read-only from ./data
+    output:
+      video: "/workspace/data/out/nim_edit.jpg"         # mounted writable from ./out (data/ is read-only)
+      caption: "/workspace/data/out/nim_edit.txt"
+      metadata: "/workspace/data/out/nim_edit_metadata.json"
+
+endpoints:
+  - id: image_edit_nim
+    role: image_edit
+    url: "http://localhost:8003"             # host NIM; container uses --network host
+    adapter: nim                             # POST /v1/infer (role default is also nim)
+    # api_key_env: BUILD_NVIDIA_API_KEY      # uncomment for an authenticated NIM
+  - id: vlm_qwen
+    role: vlm
+    url: "http://localhost:8000/v1"          # local vLLM container, no auth
+    model: "Qwen/Qwen3.6-27B-FP8"
+  - id: llm_qwen
+    role: llm
+    url: "http://localhost:8002/v1"          # local vLLM container, no auth
+    model: "Qwen/Qwen2.5-14B-Instruct"
+
+pipeline:
+  retry: 2
+  regenerate_caption_on_retry: false         # static text prompt — nothing to regenerate
+  logging:
+    enabled: true
+    level: "INFO"
+
+captioning:
+  llm:
+    endpoint_id: llm_qwen
+    text: Change the person's clothing to a {top_outer_color} {top_outer_type}, with
+      {bottom_color} {bottom_type}, and {shoe_color} {shoe_type}. ALL views of the person's clothing
+      and appearance are identical.
+    variables:
+      bottom_color:
+      - black
+      bottom_type:
+      - jeans
+      shoe_color:
+      - orange
+      shoe_type:
+      - sneakers
+      top_outer_color:
+      - blue
+      top_outer_type:
+      - sweater
+    verification_options:
+      bottom_color:
+      - beige
+      - black
+      - blue
+      - brown
+      - camouflage
+      - green
+      - grey
+      - orange
+      - pink
+      - purple
+      - red
+      - white
+      - yellow
+      bottom_type:
+      - dress
+      - leggings
+      - jeans
+      - shorts
+      - skirt
+      shoe_color:
+      - none
+      - beige
+      - black
+      - blue
+      - brown
+      - green
+      - grey
+      - orange
+      - pink
+      - purple
+      - red
+      - white
+      - yellow
+      shoe_type:
+      - barefoot
+      - boots
+      - flip-flops
+      - high heels
+      - sandals
+      - sneakers
+      top_outer_color:
+      - beige
+      - black
+      - blue
+      - brown
+      - camouflage
+      - green
+      - grey
+      - orange
+      - pink
+      - purple
+      - red
+      - white
+      - yellow
+      top_outer_type:
+      - camisole
+      - knee-length coat
+      - hoodie
+      - cropped jacket
+      - robe
+      - sweater
+      - vest
+    verification_values:
+      bottom_color:
+      - black
+      bottom_type:
+      - jeans
+      shoe_color:
+      - orange
+      shoe_type:
+      - sneakers
+      top_outer_color:
+      - blue
+      top_outer_type:
+      - sweater
+
+augmentation:
+  model:
+    name: "image-edit"
+  parameters:
+    # NIM /v1/infer uses its NATIVE knob names — NOT the chat names. It forbids
+    # unknown fields (num_inference_steps/guidance_scale -> 422 extra_forbidden).
+    steps: 50              # NIM range 5-100 (was num_inference_steps)
+    cfg_scale: 1.5         # NIM real CFG; ~1.5 sweet spot (default 4.0 over-saturates; min > 1.0).
+                           # (was guidance_scale: 1.0 — wrong name AND below the minimum)
+    seed: 42
+    # No width/height: /v1/infer defaults to aspect_ratio=match_input_image, so it
+    # follows the (resized) input's dimensions. Hardcoded width/height would force
+    # one size for ALL inputs (distorting other aspect ratios). The resize below
+    # handles arbitrary input sizes generically instead.
+
+data_processing:
+  preprocessing:
+    resize:
+      # Normalize ANY input to the chat-equivalent ~1 MP (1024x1024) on a /32 grid,
+      # aspect-ratio preserved. /v1/infer then matches it -> output aligns with chat
+      # & images/edits for any input. Also keeps us under the NIM's 2 MP cap (a raw
+      # >2 MP input, e.g. 1920x1080, is rejected with a 422 by /v1/infer).
+      target_megapixels: 1.048576   # = 1024*1024 px
+      grid: 32
+      interp: lanczos
+
+evaluators:
+- attribute_verification:
+    enabled: true
+    exclude_variables:
+    - shoe_type
+    - shoe_color
+    generate_natural_caption_on_pass: true
+    natural_caption:
+      system_prompt: 'You are an expert at describing images of people. Write a single
+        natural sentence describing the person''s appearance and clothing. Be concise
+        and factual.
+
+        '
+      user_prompt_template: 'This multi-view image shows a person with the following
+        clothing: {attributes_text}.
+
+        Write one natural sentence describing the person''s appearance and that it
+        is consistent across all views.
+
+        '
+    question_generation:
+      endpoint_id: llm_qwen
+      parameters:
+        frequency_penalty: 0.0
+        max_tokens: 2048
+        presence_penalty: 0.0
+        retry: 1
+        stream: true
+        temperature: 0.2
+        top_p: 0.95
+      system_prompt: 'You are an expert at creating multiple choice verification questions
+        for human attributes.
+
+        The images you analyze always contain a single person with one or multiple
+        views of that same person.
+
+        Your task is to generate a simple, direct question that can verify a specific
+        attribute about the person.
+
+        The question must have 2-4 answer options and test for a specific visual attribute.
+
+        The question should be answerable by looking at a single view of the person
+        even if there are multiple views.
+
+        CRITICAL: Each question MUST explicitly name which clothing/attribute is being
+        asked about. Do not use vague wording like "What type of top?" - instead specify
+        exactly which attribute, e.g. "outer layer type (shirt, jacket, etc.)", "inner
+        layer color", "bottom type (pants/skirt)", "shoe type", "shoe color". This
+        avoids ambiguity between inner vs outer layer, top vs bottom, etc.
+
+        CRITICAL: Distractor options must be clearly distinct from the correct answer.
+        Do not include visually or semantically overlapping options in the same MCQ.
+        For example, if the target/fine-grained color is "olive brown", do not offer
+        both "olive" and "brown"; choose one as the correct answer and use clearly
+        different colors as distractors. For bottom type, avoid ambiguous pairs like
+        "dress" and "skirt" in the same question when one is the correct answer.
+
+        Output your response as a single JSON object with no additional text or formatting.
+
+        '
+    vlm_verification:
+      endpoint_id: vlm_qwen
+      parameters:
+        frequency_penalty: 0.0
+        max_tokens: 256
+        retry: 5
+        stream: false
+        temperature: 1.0
+        top_p: 1.0
+      system_prompt: 'You are an expert vision model tasked with answering multiple
+        choice questions about images of humans.
+
+        The images may have one or multiple views of the same person.
+
+        Analyze the image carefully and select the single best answer from the provided
+        options.
+
+        Respond with ONLY a single letter (A, B, C, or D) corresponding to your answer.
+
+        Do not include any explanation or additional text.
+
+        '

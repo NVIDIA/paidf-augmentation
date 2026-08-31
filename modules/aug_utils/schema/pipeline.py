@@ -3,7 +3,7 @@
 
 """Pipeline-level settings: retry, logging, and evaluation."""
 
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -48,6 +48,15 @@ class PipelineSettings(BaseModel):
             "(currently the image-edit generator): a wedged/slow endpoint fails "
             "after this instead of hanging. Also the base delay for the "
             "exponential retry backoff (timeout, 2x, 4x, ... between retries)."
+        ),
+    )
+    gpus: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "GPU count for executors that manage a local inference server "
+            "(e.g. a future Cosmos NIM executor); unused by remote "
+            "OpenAI/NIM endpoint calls."
         ),
     )
     logging: LoggingConfig = Field(default_factory=LoggingConfig)

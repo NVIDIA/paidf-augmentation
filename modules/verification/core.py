@@ -58,8 +58,10 @@ class AttributeVerifier:
             Tuple of (passed_attribute_check: bool, verification_details: dict)
 
         The verification_details dictionary contains:
-            - "questions": List of generated questions
-            - "results": List of verification results for each question
+            - "results": One entry per question — the question itself (variable,
+              value, question, options, expected_answer) alongside how the VLM
+              answered it. The generated questions are not listed separately;
+              every question yields a result, including on error.
             - "summary": Summary statistics
         """
         self.logger.info(f"Starting attribute verification for video: {video_path}")
@@ -68,12 +70,14 @@ class AttributeVerifier:
         start_time = time.time()
 
         verification_details = {
-            "questions": [],
             "results": [],
             "summary": {
                 "total_checks": 0,
                 "passed_checks": 0,
                 "failed_checks": 0,
+                # VLM call failed, no verdict. Kept apart from failed_checks so
+                # an outage is not mistaken for output the VLM judged wrong.
+                "errored_checks": 0,
             },
         }
 
@@ -138,10 +142,26 @@ class AttributeVerifier:
                             "request_reasoning": eq.get("request_reasoning", False),
                         }
                     )
-            verification_details["questions"] = questions
+            # The questions are not recorded separately: each one produces a
+            # result below (errors included) carrying every field a question
+            # has, so a "questions" list would duplicate "results" outright.
             verification_details["summary"]["total_checks"] = len(questions)
 
             self.logger.info(f"Generated {len(questions)} verification questions")
+
+            # No variables to verify and no extra_questions -> zero questions.
+            # Nothing was checked, so this must NOT count as a pass: under strict
+            # evaluation a silent "0 questions -> True" would let unverified output
+            # through. Fail explicitly instead.
+            if not questions:
+                self.logger.warning(
+                    "Attribute verification produced no questions (no variables "
+                    "and no extra_questions); marking as failed so strict "
+                    "evaluation does not report an unverified pass."
+                )
+                verification_details["summary"]["reason"] = "no_questions"
+                verification_details["duration_seconds"] = time.time() - start_time
+                return False, verification_details
 
             # Step 2: Verify each question using VLM
             all_passed = True
@@ -175,6 +195,7 @@ class AttributeVerifier:
                         "question": question,
                         "options": options,
                         "expected_answer": correct_answer,
+                        "request_reasoning": request_reasoning,
                         "vlm_answer": vlm_answer,
                         "passed": is_correct,
                     }
@@ -199,7 +220,8 @@ class AttributeVerifier:
 
                 except Exception as e:
                     self.logger.error(
-                        f"Error verifying question for variable '{variable}': {e}"
+                        f"Error verifying question for variable '{variable}': "
+                        f"the VLM endpoint did not return a verdict: {e}"
                     )
                     result = {
                         "variable": variable,
@@ -207,12 +229,13 @@ class AttributeVerifier:
                         "question": question,
                         "options": options,
                         "expected_answer": correct_answer,
+                        "request_reasoning": request_reasoning,
                         "vlm_answer": "ERROR",
                         "passed": False,
                         "error": str(e),
                     }
                     verification_details["results"].append(result)
-                    verification_details["summary"]["failed_checks"] += 1
+                    verification_details["summary"]["errored_checks"] += 1
                     all_passed = False
 
             # Log summary
@@ -227,6 +250,12 @@ class AttributeVerifier:
             self.logger.info(
                 f"  Failed: {verification_details['summary']['failed_checks']}"
             )
+            errored = verification_details["summary"]["errored_checks"]
+            if errored:
+                self.logger.error(
+                    f"  Errored: {errored} (the VLM endpoint failed to answer; "
+                    f"these are NOT quality failures)"
+                )
             self.logger.info(
                 f"  Overall result: {'PASSED' if all_passed else 'FAILED'}"
             )

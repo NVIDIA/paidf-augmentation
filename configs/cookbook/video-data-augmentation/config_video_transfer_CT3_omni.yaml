@@ -1,0 +1,199 @@
+# Cosmos3-Super video transfer via vllm-omni (/v1/videos/sync), Gemma VLM + LLM captioning.
+data:
+  - inputs:
+      rgb: "/workspace/data/sample_input_93f_yuv420p.mp4"
+    output:
+      video: "/workspace/data/out/ct3_omni_snow_night.mp4"
+      caption: "/workspace/data/out/ct3_omni_snow_night.txt"
+      metadata: "/workspace/data/out/ct3_omni_snow_night_metadata.json"
+      evaluation: "/workspace/data/out/ct3_omni_snow_night_eval.json"
+
+endpoints:
+  - id: vlm_gemma
+    role: vlm
+    url: "https://integrate.api.nvidia.com/v1"
+    model: "google/gemma-4-31b-it"
+    adapter: openai.chat.completions        # role default, stated for clarity
+    api_key_env: NVIDIA_API_KEY
+    timeout: 180
+  - id: llm_gemma
+    role: llm
+    url: "https://integrate.api.nvidia.com/v1"
+    model: "google/gemma-4-31b-it"
+    adapter: openai.chat.completions
+    api_key_env: NVIDIA_API_KEY
+    timeout: 180
+
+  # --- Generation: Cosmos3-Super on vllm-omni ------------------------------------------
+  # Synchronous OpenAI video contract -> POST {url}/videos/sync, raw MP4 back.
+  - id: cosmos3-transfer-omni
+    role: video_transfer
+    url: "http://localhost:8000/v1"          # the running cosmos3 endpoint
+    model: "nvidia/Cosmos3-Super"            # sent as the `model` form field
+    adapter: openai.video.sync               # override the video_transfer role default (nim)
+    timeout: 7200                            # ~675 s/video at TP=8; TP=2 is several x slower,
+                                             #   so keep generous headroom or the adapter
+                                             #   aborts mid-generation.
+
+pipeline:
+  retry: 0                                   # keep the first render; no seed re-roll
+  regenerate_caption_on_retry: false
+  logging:
+    enabled: true
+    level: "INFO"
+  evaluation:
+    strict: false                            # report evaluator failures without killing the run
+    retain_failures: true
+
+captioning:
+  # Stage 1 -- Gemma (vision) describes the source intersection, scene content only.
+  vlm:
+    parser: "instruct"
+    system_prompt: |
+      You are a helpful assistant that describes video scenes.
+      You MUST ONLY describe the scene content itself, never the video quality
+      or technical aspects. Respond with plain descriptive text only.
+    user_prompt: >
+      Describe this traffic intersection surveillance footage.
+      Focus on weather conditions, time of day and lighting, road conditions
+      and markings, vehicles present, pedestrians, traffic signals, buildings,
+      and other physical scene elements. If you cannot see something clearly,
+      simply don't mention it. Describe only the scene content.
+    parameters:
+      temperature: 0.3
+      top_p: 0.95
+      max_tokens: 4096
+      stream: false
+      fps: 4.0
+      max_pixels: 307200
+
+  # Stage 2 -- Gemma (text) rewrites the scene to night + snow.
+  # The wording mirrors the prompt that won the sweep: night is stated FIRST and
+  # repeated, because burying "at night" mid-sentence let the daytime source win.
+  llm:
+    system_prompt: |
+      You are an expert at writing concise prompts for a video generation model.
+      You are given:
+      1. A caption describing the source traffic scene.
+      2. Attribute-value pairs describing the desired target conditions
+         (weather_condition, lighting_condition).
+      Write ONE natural-language prompt that converts the scene to a dark winter night
+      with snow, while preserving the exact camera viewpoint, road layout, lane and
+      crosswalk markings, the yellow box-junction grid, building geometry, and every
+      vehicle's position and motion.
+      Requirements for the prompt you write:
+      - Begin with the word "Nighttime." and state the darkness again later.
+      - State explicitly that there is no sunlight and no daylight, and that the sky is black.
+      - Make the only light sources artificial: street lamps with visible halos, glowing
+        traffic signals, lit building windows, vehicle headlights and red tail lights,
+        with wet reflections on the road.
+      - Describe a THIN fresh layer of snow on roads, sidewalks and the pedestrian plaza,
+        plus snow on tree branches and rooftops. Do not bury the scene in deep snow.
+      - Do NOT use the words fire, flames, embers, or "glowing orange".
+      Output only a JSON object with a single key "prompt" containing the final prompt.
+    parameters:
+      temperature: 0.3
+      top_p: 0.95
+      max_tokens: 4096
+      stream: false
+    variables:
+      weather_condition: ["snow_falling"]
+      lighting_condition: ["night"]
+
+augmentation:
+  model:
+    name: "cosmos3-transfer-omni"            # resolves to the endpoint id above
+    version: "super-transfer"
+
+  parameters:
+    # Forwarded VERBATIM as multipart form fields by the openai.video.sync adapter
+    # (dicts are JSON-encoded, bools -> "true"/"false"). These are the vllm-omni
+    # /v1/videos/sync knobs, NOT the Cosmos3 NIM /v1/infer ones.
+    size: "1280x720"            # source is 1920x1080, same 16:9
+    num_frames: 93              # MUST equal extra_params.max_frames AND
+                                #   num_video_frames_per_chunk below. 93 = 4*23+1.
+    fps: 30                     # matches the source rate
+    num_inference_steps: 50     # sole runtime driver: ~13.5 s/step at TP=8 -> ~675 s
+    guidance_scale: 5.0         # text CFG. Do NOT leave unset (server defaults to 0.0).
+    flow_shift: 10.0
+    seed: 2026
+
+    extra_params:
+      # Control HINT -> JSON-encoded into the `extra_params` form field.
+      # dict form (not `edge: true`) so the Canny threshold preset can be set.
+      # "high" = Canny(200,300); "medium" = (100,200) and keeps the scene too bright.
+      edge:
+        preset_edge_threshold: "high"
+      resolution: "720"                    # must be one of "256"/"480"/"704"/"720"
+      control_guidance: 1.2                # THE critical knob -- see header note
+      guardrails: false
+      use_resolution_template: false
+      use_duration_template: false
+      num_conditional_frames: 1
+      num_first_chunk_conditional_frames: 0
+      share_vision_temporal_positions: true
+      # Bound generation to a single chunk. WITHOUT these two the server STALLS
+      # on transfer requests. Keep both == num_frames above.
+      num_video_frames_per_chunk: 93
+      max_frames: 93
+
+    # Suppresses the daytime look the source keeps pulling toward. Deliberately OMITS
+    # the stock Cosmos terms "poorly lit areas" and "underexposed and overexposed
+    # scenes" -- those fight a night scene and measurably kept earlier runs bright.
+    negative_prompt: >-
+      daytime, daylight, sunlight, sunny, bright sun, harsh sun shadows,
+      blue daytime sky, overcast day, dusk, twilight, bright ambient daylight,
+      flat washed out lighting, sunlit pavement, bare dry asphalt,
+      green summer foliage, fire, flames, embers, warped geometry,
+      distorted layout, objects moving or vanishing, low quality,
+      compression artifacts, temporal flicker, morphing, jerky motion,
+      swimming textures, blurry muddy textures, color banding.
+
+evaluators:
+  # Optical-flow input-vs-output comparison. A full day->night+snow re-render changes
+  # nearly every pixel, and this flags that as motion artifacts even when vehicle
+  # motion is preserved. Off for heavy transfers; re-enable only for subtle edits.
+  - hallucination_check:
+      enabled: false
+      threshold: 0.65
+      params:
+        grad_thresh: 10.0
+        blur_ksize: 7
+        morph_k: 3
+        dist_tol_px: 7.0
+        max_frames: null
+
+  # Gemma writes one MCQ per variable; Gemma-vision answers it against sampled output
+  # frames. Verifies the transfer actually produced snow + night.
+  - attribute_verification:
+      enabled: true
+      generate_natural_caption_on_pass: true
+      question_generation:
+        endpoint_id: llm_gemma
+        system_prompt: |
+          You are an expert at creating multiple choice verification questions.
+          Your task is to generate a simple, direct question that can verify a
+          specific attribute in a video frame. The question must have 2-4 answer
+          options and test for a specific visual attribute. The question should be
+          answerable by looking at a single frame from the video.
+          Output your response as a single JSON object with no additional text or formatting.
+        parameters:
+          retry: 1
+          temperature: 0.2
+          top_p: 0.95
+          max_tokens: 2048
+          stream: false
+      vlm_verification:
+        endpoint_id: vlm_gemma
+        frames: 6                          # sample across the clip, not just frame 0
+        system_prompt: |
+          You are an expert vision model tasked with answering multiple choice questions
+          about images. Analyze the image carefully and select the single best answer from
+          the provided options. Respond with ONLY a single letter (A, B, C, or D)
+          corresponding to your answer. Do not include any explanation or additional text.
+        parameters:
+          retry: 0
+          temperature: 0.0
+          top_p: 1.0
+          max_tokens: 10
+          stream: false

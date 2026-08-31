@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 import logging
 import tempfile
 import os
@@ -8,10 +9,11 @@ import re
 import base64
 import shutil
 import types
+from typing import Optional
 
 import multistorageclient as msc
-from openai import OpenAI
 
+from generation.adapters.openai_chat import OpenAIChatAdapter
 from captioning.base import BaseCaptioner
 from aug_utils.common import validate_and_cast_config_params
 from aug_utils.constants import is_image
@@ -33,8 +35,6 @@ class VLMCaptioner(BaseCaptioner):
         "endpoint": str,
         "model": str,
         "parser": str,
-        "fps": float,
-        "max_pixels": int,
     }
 
     def __init__(
@@ -50,9 +50,9 @@ class VLMCaptioner(BaseCaptioner):
         endpoint: str,
         model: str,
         parser: str,
-        fps: float,
-        max_pixels: int,
         logger: logging.Logger,
+        api_key_env: Optional[str] = None,
+        extra_body: Optional[dict] = None,
     ):
         super().__init__(logger)
 
@@ -69,8 +69,6 @@ class VLMCaptioner(BaseCaptioner):
             "endpoint": endpoint,
             "model": model,
             "parser": parser,
-            "fps": fps,
-            "max_pixels": max_pixels,
         }
 
         validated_params = validate_and_cast_config_params(
@@ -91,13 +89,26 @@ class VLMCaptioner(BaseCaptioner):
         self.endpoint = validated_params["endpoint"].rstrip("/")
         self.model = validated_params["model"]
         self.parser = validated_params["parser"]
-        self.fps = validated_params["fps"]
-        self.max_pixels = validated_params["max_pixels"]
+        # Verbatim vendor payload for video requests; None -> send nothing. Kept out
+        # of validate_and_cast_config_params, which only handles scalar types.
+        self.extra_body = extra_body or None
 
         if self.parser not in ("reasoning", "instruct"):
             raise ValueError(
                 f"Invalid parser mode: {self.parser}. Must be 'reasoning' or 'instruct'"
             )
+
+        # Route chat.completions through the shared one-client adapter. Preserves
+        # the prior per-request timeout of 7200s; key resolved from the endpoint's
+        # api_key_env env var when supplied, else the role default (VLM_API_KEY).
+        self.adapter = OpenAIChatAdapter.for_chat(
+            self.endpoint,
+            self.model,
+            self.logger,
+            role="vlm",
+            timeout=7200,
+            api_key_env=api_key_env,
+        )
 
     @staticmethod
     def _clean_caption(caption: str) -> str:
@@ -143,15 +154,6 @@ class VLMCaptioner(BaseCaptioner):
             self.logger.debug(f"Downloaded media to {temp_media_path}")
 
             try:
-                api_key = os.environ.get("VLM_API_KEY")
-                if not api_key:
-                    self.logger.warning(
-                        "No VLM_API_KEY set. Using 'not-used' as placeholder."
-                    )
-                    api_key = "not-used"
-
-                client = OpenAI(base_url=self.endpoint, api_key=api_key, timeout=7200)
-
                 # Encode media as base64 for NIM VLM API
                 with open(temp_media_path, "rb") as media_file:
                     media_b64 = base64.b64encode(media_file.read()).decode()
@@ -179,25 +181,20 @@ class VLMCaptioner(BaseCaptioner):
                         self.model,
                     )
 
-                    is_qwen3_model = "qwen3" in self.model.lower()
-                    if not is_qwen3_model:
-                        extra_params = {
-                            "extra_body": {
-                                "media_io_kwargs": {"video": {"fps": self.fps}},
-                                "mm_processor_kwargs": {
-                                    "videos_kwargs": {
-                                        "min_pixels": 1568,
-                                        "max_pixels": self.max_pixels,
-                                    }
-                                },
-                            }
-                        }
+                    # Video request bodies are vendor-specific: Qwen2.5-VL/NIM take
+                    # media_io_kwargs + mm_processor_kwargs, Qwen3 ignores them, and
+                    # Gemma 400s on them. Rather than branch on model name, forward
+                    # whatever the config declares under captioning.vlm.parameters
+                    # .extra_body and send nothing when it is unset.
+                    if self.extra_body:
+                        extra_params = {"extra_body": copy.deepcopy(self.extra_body)}
+                        self.logger.debug(
+                            "Forwarding configured extra_body to VLM %s: %s",
+                            self.model,
+                            sorted(self.extra_body),
+                        )
                     else:
                         extra_params = {}
-                        self.logger.debug(
-                            "Skipping NIM extra_body params for Qwen3 model: %s",
-                            self.model,
-                        )
 
                 # Disable thinking mode for instruct parser
                 if self.parser == "instruct":
@@ -228,8 +225,16 @@ class VLMCaptioner(BaseCaptioner):
                             ],
                         }
                     ]
+                    # Instruct mode must still forward the configured system
+                    # prompt. Prepend it as a system message when set; otherwise
+                    # it never reaches the VLM (only the reasoning branch used to
+                    # send it).
+                    if self.system_prompt and self.system_prompt.strip():
+                        conversation.insert(
+                            0, {"role": "system", "content": self.system_prompt}
+                        )
 
-                chat_response = client.chat.completions.create(
+                chat_response = self.adapter.chat(
                     model=self.model,
                     messages=conversation,
                     temperature=self.temperature,

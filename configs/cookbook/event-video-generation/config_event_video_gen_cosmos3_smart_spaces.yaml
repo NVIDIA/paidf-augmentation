@@ -1,0 +1,288 @@
+data:
+  - inputs:
+      rgb: "/workspace/data/smart_spaces_seed_images/warehouse.png"
+    output:
+      video: "/workspace/data/generated_smart_spaces_cosmos3/videos/warehouse_person_falling.mp4"
+      caption: "/workspace/data/generated_smart_spaces_cosmos3/prompts/warehouse_person_falling.txt"
+      metadata: "/workspace/data/generated_smart_spaces_cosmos3/metadata/warehouse_person_falling_metadata.json"
+      evaluation: "${data.0.output.video}_evaluation.json"
+
+endpoints:
+  - id: scene_understanding_vlm
+    role: vlm
+    url: "https://inference-api.nvidia.com/v1"
+    model: "${oc.env:VLM_ENDPOINT_MODEL,''}"
+    api_key_env: VLM_API_KEY
+
+  - id: prompt_generation_vlm
+    role: llm
+    url: "https://inference-api.nvidia.com/v1"
+    model: "${oc.env:LLM_ENDPOINT_MODEL,''}"
+    api_key_env: LLM_API_KEY
+
+  - id: question_generation_vlm
+    role: llm
+    url: "https://inference-api.nvidia.com/v1"
+    model: "${oc.env:LLM_ENDPOINT_MODEL,''}"
+    api_key_env: LLM_API_KEY
+
+  - id: answering_vlm
+    role: vlm
+    url: "https://inference-api.nvidia.com/v1"
+    model: "${oc.env:VLM_ENDPOINT_MODEL,''}"
+    api_key_env: VLM_API_KEY
+
+  - id: cosmos3-super-image2video
+    role: image2video
+    # OpenAIVideoSyncAdapter posts to {url}/v1/videos/sync.
+    # Keep url at /v1 for OpenAI-compatible vLLM-Omni endpoints.
+    url: "http://localhost:8000/v1"
+    model: "nvidia/Cosmos3-Super-Image2Video"
+    adapter: openai.video.sync
+    timeout: 900
+
+pipeline:
+  retry: 0
+  regenerate_caption_on_retry: false
+  logging:
+    enabled: true
+    level: "INFO"
+  evaluation:
+    strict: false
+    retain_failures: true
+
+captioning:
+  vlm:
+    endpoint_id: scene_understanding_vlm
+    parser: "instruct"
+    system_prompt: |
+      You are a vision-language model describing fixed-view smart-space seed images
+      for image-to-video anomaly augmentation. Describe only what is visible in
+      the seed image. Do not invent a new room, new camera, new people, new
+      vehicles, new equipment, or a future anomaly. Output dense, factual scene
+      notes that a video-generation prompt writer can use to preserve object
+      consistency.
+    user_prompt: |
+      Describe this seed image in detail for a video-generation prompt writer.
+      Include only visible evidence: fixed viewpoint geometry, scene layout,
+      visible zones, people, vehicles, equipment, shelves, racks, counters,
+      pallets, boxes, floor or lane markings, foreground and background regions,
+      lighting, color palette, occlusions, and open areas where a new anomaly
+      could plausibly happen.
+
+      Describe the viewpoint as an invisible fixed surveillance viewpoint. Do not
+      mention or describe a physical CCTV camera, security camera, camera body,
+      camera lens, mount, housing, or recording device. Do not describe the
+      requested anomaly yet.
+    parameters:
+      retry: 1
+      temperature: 1.0
+      top_p: 1.0
+      frequency_penalty: 0.0
+      max_tokens: 768
+      stream: false
+      fps: 4.0
+      max_pixels: 832000
+
+  llm:
+    endpoint_id: prompt_generation_vlm
+    system_prompt: |
+      You are an expert prompt writer for NVIDIA Cosmos 3 Super image-to-video
+      safety-monitoring video generation in fixed-view smart spaces.
+
+      You receive factual VLM scene notes plus target variables:
+      anomaly_type and env_type.
+
+      Generate one final image-to-video prompt that preserves the input image as
+      the first frame and makes the requested target safety event visually
+      obvious, natural, and non-graphic.
+
+      Required order:
+      [Cinematography] + [Seed Preservation] + [Environment] + [Subject] +
+      [Action] + [Context] + [Style and Negative Constraints].
+
+      Requirements:
+      - Use the provided image as the seed reference frame.
+      - Preserve the exact viewpoint, frame crop, perspective, horizon/vertical
+        alignment, field of view, layout, lighting, object locations, color
+        palette, and background for the entire clip.
+      - The viewpoint is invisible fixed surveillance footage. Never show or
+        mention a CCTV camera, security camera, camera body, camera lens, camera
+        mount, camera housing, or any recording device in the generated video.
+      - The camera must not move: no pan, tilt, zoom, dolly, tracking, handheld
+        motion, reframing, horizon drift, upward drift, scene cuts, montage, or
+        time-lapse.
+      - Keep all existing objects and people persistent. Do not make objects
+        appear, disappear, teleport, morph, duplicate, or change scale.
+      - Add only the minimum new human motion or environmental motion needed for
+        the requested safety event, but make it large, foreground or mid-ground,
+        and unobstructed.
+      - The event must be explicit, physically plausible, non-graphic, readable
+        within the clip, and visible for multiple frames.
+      - Build every anomaly as a natural three-beat sequence: a visible setup or
+        trigger, the main action, and a short reaction or aftermath. Avoid poses
+        that look held, rehearsed, frozen, or like a deliberate demonstration.
+      - Avoid alarmist or harmful wording in the final prompt. Prefer concrete
+        physical motion language such as misstep, foot catches, foot slides,
+        arms reach for balance, torso tilts, knees buckle, side-seated recovery,
+        hand-to-mouth gesture, vapor plume, brief shoving, hands gripping a
+        ledge, smoke source, and contained flame.
+      - Write the final prompt in affirmative visual language only. Do not put
+        negated safety phrases in the final prompt, such as "no injury",
+        "without weapons", "no panic", or similar. Keep the final prompt focused
+        on visible controlled movement, stable scene layout, and fixed viewpoint.
+      - For person_falling, make the motion feel natural:
+        show an adult walking normally, one foot catching or sliding, the torso
+        pitching off balance, arms reflexively reaching out, knees bending, and
+        the body dropping to a side-seated or hip-and-hand recovery pose on the
+        floor. The fall-like event must unfold across several frames, not appear
+        as a deliberate kneel or slow controlled descent.
+      - For person_climbing, show a natural unsafe climb sequence: the adult
+        approaches a shelf, counter, railing, barrier, fixture, machinery edge,
+        pallet, or parking barrier, plants one foot, grips with both hands,
+        shifts body weight upward, and ends visibly above the normal standing
+        surface with hands and feet engaged.
+      - For person_running, show an adult moving in a rapid athletic jog across
+        the open area with a long stride, bent elbows, and arms swinging for
+        multiple frames while other adults or static objects make the abnormal
+        speed obvious. Use the words rapid athletic jog in the final prompt.
+      - For smoking_or_vaping, show a natural policy-violation sequence: an
+        adult raises a small object to the mouth, pauses, exhales a clearly
+        visible vapor or smoke plume near the face, then lowers the hand.
+      - For person_fighting, show a brief natural confrontation: two adults step
+        into each other's personal space, one reaches or pushes, the other
+        reacts by stepping back or grabbing an arm, and the motion reads as
+        pushing or grappling rather than dancing or casual conversation.
+      - For fire_or_smoke, show a visible small flame, smoke source, or dense
+        smoke plume near a fixture, machine, trash bin, shelf, pallet, counter,
+        or electrical area, with the smoke rising and nearby adults naturally
+        noticing or stepping away.
+      - If the setting could include minors, do not depict children as
+        perpetrators of fighting, smoking, vaping, or fire-setting. Use adult
+        staff, adult visitors, or college-age people when age is ambiguous.
+      - For env_type school, refer to the setting as an education-facility
+        hallway or campus hallway, and use only adult staff, adult visitors, or
+        college-age adults. Do not use the words school, student, students,
+        child, children, minor, minors, kid, or kids in the final prompt.
+      - Use realistic smart-space behavior, ordinary compressed surveillance
+        video quality, practical lighting, deep depth of field, and plain visual
+        language.
+      - Keep the final prompt free of graphic or violent wording. Put visual
+        artifact and camera-motion exclusions only when needed.
+      - Output only a JSON object with one key: "prompt".
+    example_prompt: |
+      Use the provided image as the first frame and seed reference. Invisible
+      locked-off surveillance-footage viewpoint with the exact same crop,
+      perspective, horizon/vertical alignment, field of view, layout, lighting,
+      object locations, existing people, and background objects for every frame.
+      In the configured smart-space environment, the configured staged safety
+      event happens clearly in an unobstructed foreground or mid-ground area
+      while the rest of the scene remains stable. Ordinary compressed
+      surveillance-video quality, practical lighting, deep depth of field,
+      realistic body motion, natural stumble timing, no pan, no tilt, no zoom, no
+      reframing, no cuts, no visible camera device, no object popping, no
+      disappearing objects, no cinematic effects.
+    parameters:
+      retry: 1
+      temperature: 0.2
+      top_p: 0.9
+      max_tokens: 1024
+      frequency_penalty: 0.0
+      presence_penalty: 0.0
+      stream: false
+    variables:
+      anomaly_type: ["person_falling"]
+      env_type: ["warehouse"]
+    verification_options:
+      anomaly_type:
+        - "person_falling"
+        - "person_climbing"
+        - "person_running"
+        - "smoking_or_vaping"
+        - "person_fighting"
+        - "fire_or_smoke"
+      env_type:
+        - "warehouse"
+        - "school"
+        - "parking_lot"
+        - "retail"
+        - "factory"
+
+augmentation:
+  model:
+    name: "cosmos3-image2video"
+    version: "super"
+
+  parameters:
+    negative_prompt: >
+      camera movement, pan, tilt, upward tilt, downward tilt, zoom, dolly,
+      tracking shot, handheld motion, reframing, horizon drift, view drift, view
+      angle change, camera angle change, cuts, montage, time lapse, scene
+      change, cutaway, cutaway to a camera, visible CCTV camera, visible
+      security camera, surveillance camera device, camera body, camera lens,
+      camera mount, camera housing, camera lens close-up, generic CCTV camera,
+      fisheye, lens flare, vignette, bokeh, shallow depth of field, cinematic
+      lighting, stylized film look, text overlay, UI overlay, timestamp overlay,
+      scanlines, object popping, disappearing objects, teleporting people,
+      morphing layout, duplicated people, dramatic chaos, emergency crowd,
+      aggressive close-up
+    size: "832x480"
+    num_frames: 189
+    fps: 24
+    num_inference_steps: 50
+    guidance_scale: 6.0
+    flow_shift: 5.0
+    seed: 86000
+    extra_params:
+      use_resolution_template: false
+      use_duration_template: false
+      guardrails: false
+
+evaluators:
+  - attribute_verification:
+      enabled: true
+      exclude_variables: []
+      question_generation:
+        endpoint_id: question_generation_vlm
+        generate_options: true
+        system_prompt: |
+          You write one simple multiple-choice question that checks whether a
+          generated fixed-view surveillance video contains the requested anomaly
+          or environment. The question must be easy for a VLM to answer from
+          sampled video frames, name the attribute being checked, include the
+          correct value plus 2-3 plausible but clearly wrong distractors, and
+          mark the correct option.
+
+          Keep question text short and direct. Keep options visually distinct.
+          Avoid subtle wording, trick questions, and questions about tiny
+          details. Output only JSON:
+          {"variable","value","question","options":{"A","B",...},"correct_answer"}.
+        parameters:
+          retry: 1
+          temperature: 1.0
+          top_p: 1.0
+          max_tokens: 1024
+          frequency_penalty: 0.0
+          presence_penalty: 0.0
+          stream: false
+
+      vlm_verification:
+        endpoint_id: answering_vlm
+        # Cosmos 3 Super generates about 8 seconds at 24 fps (~192 source
+        # frames). Sample 24 evenly spaced frames, about 3 frames per second,
+        # so the verifier sees the setup, action, and aftermath.
+        frames: 24
+        system_prompt: |
+          You are a VLM verifier for generated fixed-view smart-space
+          anomaly/action videos. You are shown ordered frames sampled evenly
+          from one generated clip. Look only at the provided frames. Answer
+          each multiple-choice question using visible evidence across the
+          frames. Return the single best option letter only: A, B, C, or D. Do
+          not explain.
+        parameters:
+          retry: 1
+          temperature: 1.0
+          top_p: 1.0
+          max_tokens: 10
+          frequency_penalty: 0.0
+          stream: false

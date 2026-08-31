@@ -1,115 +1,135 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import os
-import time
-import logging
+"""Registry-driven generator factory for the BYOM generation layer.
 
-from aug_utils.schema.augmentation import ModelNameEnum
+``create_generator`` resolves the configured ``augmentation.model.name`` to an
+endpoint in the endpoints list, picks the API-contract adapter for that
+endpoint, and wraps it in an executor. The result is a :class:`BaseGenerator`
+(actually a :class:`BaseExecutor`) so the CLI invariant — ``execute(...)`` +
+mutable ``.seed`` — keeps working unchanged.
+"""
+
+import logging
+import time
+from typing import Optional
+
+from aug_utils.endpoint_registry import effective_adapter, resolve_endpoint
+from aug_utils.schema.endpoints import Endpoint
+
+from .adapters import (
+    NIMAdapter,
+    OpenAIChatAdapter,
+    OpenAIImageEditAdapter,
+    OpenAIVideoAsyncAdapter,
+    OpenAIVideoSyncAdapter,
+    PassthroughAdapter,
+)
 from .base import BaseGenerator
-from .cosmos_generator import CosmosGenerator
-from .cosmos_predict_generator import CosmosPredictGenerator
-from .image_edit_generator import ImageEditGenerator
+from .executors import BaseExecutor, seed_holder
+from .inputs_spec import inputs_spec_for
+
+# API-contract adapters, keyed by contract name. Mirrors
+# ``aug_utils.schema.adapters.KNOWN_ADAPTERS``.
+ADAPTERS = {
+    "openai.chat.completions": OpenAIChatAdapter,
+    "openai.images.edits": OpenAIImageEditAdapter,
+    "openai.video.sync": OpenAIVideoSyncAdapter,
+    "openai.video.async": OpenAIVideoAsyncAdapter,
+    "nim": NIMAdapter,
+    "passthrough": PassthroughAdapter,
+}
+
+# Per-role executor overrides. Empty for now; a future Cosmos executor that
+# manages a local inference server registers here by role.
+EXECUTOR_OVERRIDES = {}
 
 
 def create_generator(config, logger: logging.Logger) -> BaseGenerator:
-    """Create appropriate generator based on the ``augmentation`` configuration.
+    """Create a generator from the ``augmentation`` configuration.
 
-    Dispatches on ``augmentation.model.name``:
-    - ``cosmos-transfer2.5`` → :class:`CosmosGenerator`
-    - ``cosmos-predict``     → :class:`CosmosPredictGenerator` (stub)
-    - ``image-edit``         → :class:`ImageEditGenerator`
+    Resolves ``augmentation.model.name`` against the endpoints list, builds the
+    matching adapter, and returns a :class:`BaseExecutor` for the endpoint's
+    role.
 
     Args:
         config: Full pipeline config (PipelineConfig model or raw dict).
         logger: Logger instance.
 
     Returns:
-        BaseGenerator: Configured generator instance.
+        BaseGenerator: Configured executor instance.
 
     Raises:
-        ValueError: If augmentation config is missing or model name is unknown.
+        ValueError: If augmentation is missing, no endpoint matches, or the
+            resolved adapter contract is unknown.
     """
-    # Support both Pydantic model and raw dict
-    if hasattr(config, "augmentation"):
-        aug = config.augmentation
-        endpoints = config.endpoints
-        if aug is None:
-            raise ValueError("'augmentation' section is required to create a generator")
-        model_name = (
-            aug.model.name.value
-            if hasattr(aug.model.name, "value")
-            else str(aug.model.name)
-        )
-        executor_type = (
-            aug.model.executor_type.value
-            if hasattr(aug.model.executor_type, "value")
-            else str(aug.model.executor_type)
-        )
-        params = (
-            aug.parameters.model_dump()
-            if hasattr(aug.parameters, "model_dump")
-            else aug.parameters
-        )
-        modalities_cfg = (
-            aug.modalities.model_dump()
-            if aug.modalities and hasattr(aug.modalities, "model_dump")
-            else (aug.modalities or {})
-        )
-        local_params = (
-            aug.local_parameters.model_dump()
-            if aug.local_parameters and hasattr(aug.local_parameters, "model_dump")
-            else {}
-        )
-        model_version = aug.model.version
-        endpoints_dict = (
-            endpoints.model_dump() if hasattr(endpoints, "model_dump") else endpoints
-        )
-        request_timeout = config.pipeline.request_timeout
-    else:
-        aug_dict = config.get("augmentation")
-        if not aug_dict:
-            raise ValueError("'augmentation' section is required to create a generator")
-        model_name = aug_dict["model"]["name"]
-        executor_type = aug_dict["model"].get("executor_type", "local")
-        params = aug_dict.get("parameters", {})
-        modalities_cfg = aug_dict.get("modalities") or {}
-        local_params = aug_dict.get("local_parameters") or {}
-        model_version = aug_dict["model"].get("version")
-        endpoints_dict = config.get("endpoints", {})
-        request_timeout = (config.get("pipeline") or {}).get("request_timeout")
+    augmentation, raw_endpoints = _read_sections(config)
 
-    if model_name == ModelNameEnum.COSMOS_TRANSFER.value:
-        return _create_cosmos_transfer(
-            params,
-            modalities_cfg,
-            local_params,
-            endpoints_dict,
-            executor_type,
-            model_version,
-            logger,
-        )
-    elif model_name == ModelNameEnum.COSMOS_PREDICT.value:
-        return _create_cosmos_predict(
-            params,
-            local_params,
-            endpoints_dict,
-            executor_type,
-            model_version,
-            logger,
-        )
-    elif model_name == ModelNameEnum.IMAGE_EDIT.value:
-        return _create_image_edit(
-            params,
-            endpoints_dict,
-            request_timeout,
-            logger,
-        )
-    else:
-        valid_models = ", ".join(m.value for m in ModelNameEnum)
+    # Normalize endpoints to Endpoint objects so adapters get attribute access.
+    endpoints = [
+        ep if not isinstance(ep, dict) else Endpoint(**dict(ep))
+        for ep in _as_list(raw_endpoints)
+    ]
+
+    name = (
+        augmentation.model.name.value
+        if hasattr(augmentation.model.name, "value")
+        else str(augmentation.model.name)
+    )
+
+    ep = resolve_endpoint(endpoints, name)
+
+    contract = effective_adapter(ep)
+    adapter_cls = ADAPTERS.get(contract)
+    if adapter_cls is None:
         raise ValueError(
-            f"Unknown augmentation model: '{model_name}'. Valid models: {valid_models}"
+            f"endpoint {ep.id!r} resolves to unknown adapter {contract!r}; "
+            f"known adapters: {list(ADAPTERS)}"
         )
+    # pipeline.request_timeout, when the user set it explicitly, overrides the
+    # adapter's own default (image-edit 120s, video 900s, ...) -- but never a
+    # per-endpoint timeout, which stays authoritative. An unset request_timeout
+    # leaves each adapter on its default.
+    request_timeout = _explicit_request_timeout(config)
+    if request_timeout is not None and getattr(ep, "timeout", None) is None:
+        ep = ep.model_copy(update={"timeout": request_timeout})
+    adapter = adapter_cls(ep, logger)
+
+    # Build params: only the knobs the user actually set (exclude_unset), so the
+    # typed schema's defaults for OTHER models (e.g. cosmos sigma/num_steps) do
+    # not leak onto the wire and get rejected by a strict endpoint. This is the
+    # "pass through exactly what's configured" half of the hybrid param model.
+    params = _dump(augmentation.parameters, exclude_unset=True)
+    modalities = (
+        _dump(augmentation.modalities, exclude_unset=True)
+        if augmentation.modalities
+        else {}
+    )
+    # Control-modality weights (edge/depth/seg/vis) must reach the adapter as
+    # {control_weight: value} objects so a control input can attach to them; a
+    # bare float is rejected by NIMAdapter ("params.<modality> must be an
+    # object"). Prompt/string modality fields pass through unchanged.
+    for _mod in ("edge", "depth", "seg", "vis"):
+        weight = modalities.get(_mod)
+        if weight is not None and not isinstance(weight, dict):
+            modalities[_mod] = {"control_weight": weight}
+    params.update(modalities)
+    # Resolve seed where the config placed it (top-level or inside an envelope
+    # such as `extra_body`), so retry re-roll mutates the seed the model reads.
+    holder = seed_holder(params)
+    holder["seed"] = _resolve_seed(holder.get("seed"), logger)
+
+    inference_type = params.get("inference_type")
+    if hasattr(inference_type, "value"):
+        inference_type = inference_type.value
+        params["inference_type"] = inference_type
+
+    inputs_spec = inputs_spec_for(ep.role, inference_type)
+
+    executor_cls = EXECUTOR_OVERRIDES.get(ep.role, BaseExecutor)
+    return executor_cls(
+        adapter=adapter, params=params, inputs_spec=inputs_spec, logger=logger
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -117,164 +137,79 @@ def create_generator(config, logger: logging.Logger) -> BaseGenerator:
 # ---------------------------------------------------------------------------
 
 
+def _read_sections(config):
+    """Return ``(augmentation, raw_endpoints)`` from a model or raw dict.
+
+    The augmentation section is always returned as a Pydantic-like object
+    exposing ``.model`` / ``.parameters`` / ``.modalities``; raw-dict configs
+    are coerced into the typed model.
+    """
+    if hasattr(config, "augmentation"):
+        aug = config.augmentation
+        endpoints = config.endpoints
+    else:
+        aug = config.get("augmentation")
+        endpoints = config.get("endpoints", [])
+
+    if aug is None:
+        raise ValueError("'augmentation' section is required to create a generator")
+
+    if not hasattr(aug, "model"):
+        from aug_utils.schema.augmentation import AugmentationConfig
+
+        aug = AugmentationConfig(**dict(aug))
+
+    return aug, endpoints
+
+
+def _as_list(value):
+    """Coerce an endpoints container (incl. OmegaConf) into a plain list."""
+    if value is None:
+        return []
+    return list(value)
+
+
+def _explicit_request_timeout(config) -> Optional[float]:
+    """Return ``pipeline.request_timeout`` only when the user set it explicitly.
+
+    Used as a generation-adapter timeout override. Returns ``None`` (keep the
+    adapter's own default) when the field was left unset, so a defaulted
+    ``request_timeout`` never shortens an adapter whose default is longer
+    (e.g. the 900s video adapters).
+    """
+    if hasattr(config, "pipeline"):
+        pipeline = config.pipeline
+        if pipeline is not None and "request_timeout" in getattr(
+            pipeline, "model_fields_set", set()
+        ):
+            return float(pipeline.request_timeout)
+        return None
+    pipeline = config.get("pipeline") if hasattr(config, "get") else None
+    if isinstance(pipeline, dict) and pipeline.get("request_timeout") is not None:
+        return float(pipeline["request_timeout"])
+    return None
+
+
+def _dump(obj, *, exclude_unset: bool = False) -> dict:
+    """Return a plain dict for a Pydantic model or a mapping.
+
+    ``exclude_unset`` drops fields left at their schema default so only
+    explicitly-configured params reach the endpoint payload.
+    """
+    if obj is None:
+        return {}
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump(exclude_unset=exclude_unset)
+    return dict(obj)
+
+
 def _resolve_seed(seed_value, logger: logging.Logger) -> int:
     """Resolve a seed value, generating one from time if None."""
     if seed_value is None or seed_value == "None" or seed_value == "none":
-        seed = int(time.time())
+        # Sub-second entropy so two generators created within the same second
+        # don't collide on int(time.time()); masked to 31 bits to stay in the
+        # non-negative int32 range endpoints accept for a seed.
+        seed = time.time_ns() % (2**31)
         logger.debug(f"Generated random seed: {seed}")
         return seed
     return int(seed_value)
-
-
-def _create_cosmos_transfer(
-    params,
-    modalities_cfg,
-    local_params,
-    endpoints_dict,
-    executor_type,
-    model_version,
-    logger,
-) -> CosmosGenerator:
-    cosmos_ep = endpoints_dict.get("cosmos_transfer") or {}
-    endpoint = (
-        os.getenv("COSMOS_ENDPOINT_URL")
-        or (
-            cosmos_ep.get("url")
-            if isinstance(cosmos_ep, dict)
-            else getattr(cosmos_ep, "url", None)
-        )
-        or "http://localhost:30002/"
-    )
-    seed = _resolve_seed(params.get("seed"), logger)
-
-    # Extract modality weights (numeric) vs prompt fields (string)
-    modality_weights = {}
-    for key in ("edge", "depth", "seg", "vis"):
-        val = modalities_cfg.get(key)
-        if val is not None:
-            modality_weights[key] = float(val)
-
-    modality_names = list(modality_weights.keys())
-
-    # Gather any extra executor-specific params
-    executor_specific = dict(local_params)
-    seg_control_prompt = modalities_cfg.get("seg_control_prompt")
-    if seg_control_prompt:
-        executor_specific["seg_control_prompt"] = seg_control_prompt
-    return CosmosGenerator(
-        executor_type=executor_type,
-        endpoint=endpoint,
-        sigma=params.get("sigma", 90),
-        seed=seed,
-        guidance=params.get("guidance", 3),
-        num_steps=params.get("num_steps", 35),
-        modalities=modality_names,
-        weights=modality_weights,
-        positive_prompt=modalities_cfg.get("positive_prompt", ""),
-        negative_prompt=modalities_cfg.get("negative_prompt", ""),
-        inference_name=params.get("inference_name", "cosmos_transfer_inference"),
-        logger=logger,
-        model_version=model_version,
-        **executor_specific,
-    )
-
-
-_PREDICT_MODEL_MAP = {
-    "2B": "2B/post-trained",
-    "2B-distilled": "2B/distilled",
-    "14B": "14B/post-trained",
-}
-
-
-def _create_cosmos_predict(
-    params, local_params, endpoints_dict, executor_type, model_version, logger
-) -> BaseGenerator:
-    if executor_type != "local":
-        raise ValueError(
-            f"Cosmos Predict currently only supports executor_type='local', "
-            f"got '{executor_type}'"
-        )
-    predict_ep = endpoints_dict.get("cosmos_predict") or {}
-    endpoint = (
-        os.getenv("COSMOS_PREDICT_ENDPOINT_URL")
-        or (
-            predict_ep.get("url")
-            if isinstance(predict_ep, dict)
-            else getattr(predict_ep, "url", None)
-        )
-        or ""
-    )
-    seed = _resolve_seed(params.get("seed"), logger)
-
-    # Resolve model name for --model CLI arg
-    predict_model = None
-    if model_version:
-        predict_model = _PREDICT_MODEL_MAP.get(model_version, model_version)
-
-    inference_type_raw = params.get("inference_type", "video2world")
-    inference_type = (
-        inference_type_raw.value
-        if hasattr(inference_type_raw, "value")
-        else str(inference_type_raw)
-    )
-
-    return CosmosPredictGenerator(
-        endpoint=endpoint,
-        inference_type=inference_type,
-        num_output_frames=params.get("num_output_frames"),
-        num_steps=params.get("num_steps", 35),
-        enable_autoregressive=params.get("enable_autoregressive"),
-        chunk_size=params.get("chunk_size"),
-        chunk_overlap=params.get("chunk_overlap"),
-        seed=seed,
-        guidance=params.get("guidance", 3.0),
-        inference_name=params.get("inference_name", "cosmos_predict_inference"),
-        resolution=params.get("resolution", "none"),
-        model=predict_model,
-        logger=logger,
-        offload_tokenizer=params.get("offload_tokenizer"),
-        offload_text_encoder=params.get("offload_text_encoder"),
-        **dict(local_params),
-    )
-
-
-def _create_image_edit(
-    params, endpoints_dict, request_timeout, logger
-) -> ImageEditGenerator:
-    image_edit_ep = endpoints_dict.get("image_edit") or {}
-    endpoint = (
-        os.getenv("IMAGE_EDIT_ENDPOINT_URL")
-        or (
-            image_edit_ep.get("url")
-            if isinstance(image_edit_ep, dict)
-            else getattr(image_edit_ep, "url", None)
-        )
-        or ""
-    )
-    if not endpoint:
-        raise ValueError("Image edit endpoint not configured")
-
-    seed = _resolve_seed(params.get("seed"), logger)
-    api_key = os.getenv("IMAGE_EDIT_API_KEY")
-    model = (
-        image_edit_ep.get("model")
-        if isinstance(image_edit_ep, dict)
-        else getattr(image_edit_ep, "model", None)
-    ) or ""
-
-    # Honor explicit `negative_prompt: null` in YAML (disables CFG) vs absent
-    # key (use the canonical " " default that enables CFG with no real
-    # negative). The schema default is " ", so unset YAMLs get CFG.
-    negative_prompt = params["negative_prompt"] if "negative_prompt" in params else " "
-
-    return ImageEditGenerator(
-        endpoint=endpoint,
-        num_inference_steps=params.get("num_inference_steps", 50),
-        guidance_scale=params.get("guidance_scale", 1.0),
-        seed=seed,
-        model=model or None,
-        api_key=api_key,
-        negative_prompt=negative_prompt,
-        timeout=request_timeout,
-        logger=logger,
-    )

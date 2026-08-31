@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 uv run modules/cli.py --config configs/<config_file>.yaml
 
 # Run with OmegaConf CLI overrides
-uv run modules/cli.py --config configs/config_isaacsim.yaml data.0.inputs.rgb=/path/to/video.mp4
+uv run modules/cli.py --config configs/cookbook/video-data-augmentation/config_video_transfer_CT25_nim.yaml data.0.inputs.rgb=/path/to/video.mp4
 
 # Run tests
 uv run pytest tests/
@@ -20,16 +20,21 @@ uv run pytest tests/schema/test_schema.py::TestValidConfigs::test_minimal_cosmos
 uv run ruff check modules/
 uv run ruff format --check modules/
 
-# Docker inference (GPU required)
-sudo docker run -it --rm --network host --runtime nvidia \
-  -e NVIDIA_VISIBLE_DEVICES=all \
-  -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
-  --env-file examples/.env \
-  -v "$(pwd)/modules:/app/modules" \
-  -v "$(pwd)/configs:/app/configs" \
-  paidf-augmentation:latest \
-  uv run modules/cli.py --config configs/<config_file>.yaml
+# Docker inference — no GPU needed for remote inference. The image ENTRYPOINT is
+# already `uv run --no-sync /workspace/modules/cli.py`, so pass only CLI args.
+docker run --rm --network host \
+  -v "$(pwd)/configs:/workspace/configs" \
+  -v "$(pwd)/data:/workspace/data" \
+  paidf-augmentation:1.1.0 \
+  --config configs/<config_file>.yaml
 ```
+
+Add `--env-file examples/.env` only when an endpoint needs an API key.
+
+Add `--gpus` only for the `data_processing.alignment` post-processor (cupy) and
+whenever **H.264** must be decoded (the evaluators and `data_processing.transcode`),
+since the image ships only the hardware `h264_cuvid` decoder. VP9 decodes in software.
+`--network host` is needed only to reach endpoints on the host's `localhost`.
 
 ## Architecture
 
@@ -37,33 +42,58 @@ The pipeline processes media through: **Captioning -> Generation -> Evaluation**
 
 ### Unified Pydantic Schema (`modules/aug_utils/schema/`)
 
-All YAML configs are validated against a single `PipelineConfig` root model. The schema has 6 top-level sections:
+All YAML configs are validated against a single `PipelineConfig` root model. The schema has 7 top-level sections:
 
 | Section | Purpose |
 |---------|---------|
 | `data` | List of input/output sample paths (rgb, controls, video, caption, metadata) |
-| `endpoints` | API endpoint URLs/models for vlm, llm, cosmos_transfer, cosmos_predict, image_edit |
-| `pipeline` | Retry count, logging level, evaluation settings (strict, retain_failures) |
-| `captioning` | VLM and/or LLM sub-sections — captioner type is **inferred from which sub-sections are present** |
-| `augmentation` | Model name (enum), executor type, generation parameters, control modalities |
+| `endpoints` | **List** of endpoint registry entries — see below |
+| `pipeline` | Retry count, request timeout, logging level, evaluation settings (strict, retain_failures) |
+| `captioning` | `vlm`, `llm`, and/or `template` sub-sections — captioner type is **inferred from which sub-sections are present** |
+| `augmentation` | Model name (free-form string), generation parameters, control modalities |
+| `data_processing` | `preprocessing.resize` (before generation), `alignment` and `transcode` (after) |
 | `evaluators` | Ordered list of hallucination_check, attribute_verification, vlm_verification |
 
-Cross-section validation in `config.py` ensures endpoint requirements match the configured model and captioning strategy. Local executors don't require remote endpoints for cosmos models.
+Cross-section validation in `config.py` ensures endpoint requirements match the configured model and captioning strategy.
+
+### Endpoint Registry (BYOM)
+
+`endpoints` is a **flat list**, not a per-role mapping. Each entry declares its own role and API contract, so any OpenAI-compatible or NIM server can be driven from config alone:
+
+```yaml
+endpoints:
+  - id: vlm_qwen              # optional; REQUIRED when 2+ entries share a role
+    role: vlm                 # vlm | llm | image_edit | image2video | video_transfer | video_predict
+    url: "http://localhost:8000/v1"
+    model: "Qwen/Qwen3.6-27B-FP8"
+    adapter: openai.chat.completions   # optional; defaults per role
+    api_key_env: VLM_API_KEY  # env var NAME — never a literal key
+    timeout: 600              # optional per-endpoint override
+```
+
+Consumers (captioning, evaluators) select an endpoint with `endpoint_id`; generation resolves `augmentation.model.name` against the registry by `id`, then `role`, then the legacy model-name→role map (`aug_utils/endpoint_registry.py`).
+
+### Adapters and Executor
+
+Transport is a pluggable **adapter**; execution is one generic `BaseExecutor`. There are no per-model generator classes and no `executor_type` — all inference is remote.
+
+| Adapter | API route | Default for roles |
+|---------|-----------|-------------------|
+| `openai.chat.completions` | `POST /v1/chat/completions` | `vlm`, `llm` |
+| `openai.images.edits` | `POST /v1/images/edits` (multipart) | — |
+| `nim` | `POST /v1/infer` | `image_edit`, `video_transfer`, `video_predict` |
+| `openai.video.sync` | `POST /v1/videos/sync` (multipart → MP4 bytes) | `image2video` |
+| `openai.video.async` | create → poll → download | — |
+| `passthrough` | none (echoes input; test seam) | — |
+
+`KNOWN_ADAPTERS` in `aug_utils/schema/adapters.py` mirrors the `ADAPTERS` dict in `generation/factory.py` — **update both** when adding one. Only explicitly-set generation params are sent on the wire (`exclude_unset`), so one model's defaults never leak into another's payload.
 
 ### Factory Dispatch Pattern
 
-Both `captioning/factory.py` and `generation/factory.py` use factory functions that accept the full config and dispatch based on field presence:
+Both `captioning/factory.py` and `generation/factory.py` accept the full config and dispatch on field presence:
 
-- **Captioning** (`create_captioner`): Inferred from which fields are set under `captioning.llm` and `captioning.vlm`. `llm.text` -> TextCaptioner, `llm.file_path` -> FileCaptioner, both vlm+llm -> VLMLLMCaptioner, vlm only -> VLMCaptioner, llm only -> LLMCaptioner. Combining `vlm` with `llm.text`/`llm.file_path` is an error.
-- **Generation** (`create_generator`): Dispatches on `augmentation.model.name` enum: `cosmos-transfer2.5`, `cosmos-predict`, `image-edit`.
-
-### Supported Models
-
-| Model | Executor Types | Config Example |
-|-------|---------------|----------------|
-| `cosmos-transfer2.5` | local, gradio, passthrough | `config_carla_vlm_llm.yaml` |
-| `cosmos-predict` | local, gradio | `config_cosmos_predict.yaml` |
-| `image-edit` | gradio | `config_image_edit_verification.yaml` |
+- **Captioning** (`create_captioner`): `llm.text` → TextCaptioner, `llm.file_path` → FileCaptioner, `template` (requires `vlm`) → template captioner, vlm+llm → VLMLLMCaptioner, vlm only → VLMCaptioner, llm only → LLMCaptioner. Combining `vlm` with `llm.text`/`llm.file_path`, or `template` with `llm`, is an error.
+- **Generation** (`create_generator`): resolves the endpoint, picks its adapter, wraps it in an executor.
 
 ### Config Validation Flow
 
@@ -86,4 +116,6 @@ All file I/O uses `multistorageclient` (aliased as `msc`) which transparently ha
 
 ### Environment Variables
 
-Endpoints and API keys can be overridden via env vars (e.g., `VLM_ENDPOINT_URL`, `LLM_API_KEY`). Env vars take precedence over config values. `VLM_API_KEY` and `LLM_API_KEY` are the standardized key names.
+**API keys never come from config.** `Endpoint` has no `api_key` field — only `api_key_env`, naming the env var to read. `resolve_api_key()` (`generation/adapters/base.py`) tries `api_key_env` first, then the role default: `VLM_API_KEY`, `LLM_API_KEY`, and `BUILD_NVIDIA_API_KEY` for all generation roles. A stray `api_key:` in a config is silently ignored, not rejected.
+
+**URL overrides apply to captioning/evaluator consumers only.** `VLM_ENDPOINT_URL`, `LLM_ENDPOINT_URL`, and `LLM_CAPTION_ENDPOINT_URL` take precedence over the config's `url` for `vlm`/`llm` roles. Generation endpoints resolve purely from the registry — `COSMOS_ENDPOINT_URL`, `COSMOS_PREDICT_ENDPOINT_URL`, `IMAGE_EDIT_ENDPOINT_URL`, and `IMAGE_EDIT_API_KEY` still appear in `validate_environment()`'s log list but are **legacy and no longer applied**.

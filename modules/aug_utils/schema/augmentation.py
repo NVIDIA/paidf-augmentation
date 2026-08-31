@@ -6,11 +6,16 @@
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ModelNameEnum(str, Enum):
-    """Supported augmentation model names."""
+    """Historically supported augmentation model names.
+
+    With BYOM, ``ModelConfig.name`` is a free-form string and is no longer
+    constrained to this enum; the enum is retained because other code/tests
+    still reference its canonical values.
+    """
 
     COSMOS_TRANSFER = "cosmos-transfer2.5"
     COSMOS_PREDICT = "cosmos-predict"
@@ -25,30 +30,30 @@ class PredictInferenceType(str, Enum):
     VIDEO2WORLD = "video2world"
 
 
-class ExecutorTypeEnum(str, Enum):
-    """Supported executor backends."""
-
-    LOCAL = "local"
-    GRADIO = "gradio"
-    PASSTHROUGH = "passthrough"
-
-
 class ModelConfig(BaseModel):
-    """Augmentation model selection and executor configuration."""
+    """Augmentation model selection (BYOM: free-form model name)."""
 
-    name: ModelNameEnum = Field(description="Model to use for augmentation")
+    name: str = Field(description="Model to use for augmentation")
     version: Optional[str] = Field(default=None, description="Model version (TBD)")
-    executor_type: ExecutorTypeEnum = Field(
-        default=ExecutorTypeEnum.LOCAL,
-        description="Execution backend",
-    )
 
 
 class AugmentationParameters(BaseModel):
     """Union of all model-specific generation parameters.
 
+    BYOM-friendly by design: this is the pass-through surface to whatever model
+    the config selects, so it is intentionally permissive.
+      * ``extra="allow"`` — params NOT listed below (a new model's own knobs) are
+        accepted and forwarded to the wire as-is. Adding a model needs no schema
+        change.
+      * ``coerce_numbers_to_str=True`` — a value written as a number for a
+        string-typed field is coerced rather than rejected (e.g. ``resolution:
+        720`` -> ``"720"``, which is what the Cosmos NIM expects on the wire). So
+        a config can write the knob the natural way regardless of the field's
+        declared type.
     Only the fields relevant to the selected model are used at runtime.
     """
+
+    model_config = ConfigDict(extra="allow", coerce_numbers_to_str=True)
 
     # Shared parameters
     seed: Optional[int] = Field(default=None, description="Random seed (None = auto)")
@@ -132,13 +137,6 @@ class ModalitiesConfig(BaseModel):
     negative_prompt: Optional[str] = Field(default=None)
 
 
-class LocalParameters(BaseModel):
-    """Parameters specific to the local executor."""
-
-    num_processes: int = Field(default=8, gt=0)
-    master_port: int = Field(default=12341, ge=1, le=65535)
-
-
 class AugmentationConfig(BaseModel):
     """Top-level augmentation configuration (replaces ``generation``)."""
 
@@ -147,8 +145,4 @@ class AugmentationConfig(BaseModel):
     modalities: Optional[ModalitiesConfig] = Field(
         default=None,
         description="Control modalities (only for cosmos-transfer2.5)",
-    )
-    local_parameters: Optional[LocalParameters] = Field(
-        default=None,
-        description="Parameters for the local executor",
     )

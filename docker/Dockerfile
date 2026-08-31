@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Endpoint-only image: remote API inference, no local Cosmos/torch. Keeps the
+# CUDA base image and the LGPL/OSRB-cleared FFmpeg build from the full image
+# (both cleared through the legal process); only the local Cosmos/torch
+# inference stack is dropped.
 FROM nvidia/cuda:13.0.2-devel-ubuntu24.04
 
 # Use bash with pipefail so RUN steps fail on upstream errors inside pipes.
@@ -17,13 +21,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     CUDA_MODULE_LOADING=LAZY \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
-    TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
-    PYTORCH_ALLOC_CONF=expandable_segments:True \
     UV_LINK_MODE=copy
 
-# -------- OS deps (build toolchain + runtime libs) --------
-# FFmpeg is built from source (see below). We deliberately omit the `ffmpeg`
-# binary so /usr/local/bin/ffmpeg (LGPL source build) stays first in PATH.
+# -------- OS deps (FFmpeg+OpenCV build toolchain + runtime libs) --------
+# Source-built LGPL FFmpeg for a clean scan posture: FFmpeg in /usr/local,
+# opencv from sdist with WITH_FFMPEG=OFF, PyAV source-built against
+# /usr/local FFmpeg.
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential \
@@ -31,39 +34,49 @@ RUN apt-get update \
         cmake \
         curl \
         git \
-        git-lfs \
         jq \
         ninja-build \
-        wget \
-        unzip \
+        pkg-config \
+        yasm \
+        nasm \
+        libgnutls28-dev \
         libgl1 \
         libglib2.0-0 \
         libgomp1 \
         libjpeg-dev \
         libpng-dev \
         libtiff-dev \
+        libvpx-dev \
         libwebp-dev \
         zlib1g-dev \
-        pkg-config \
-        yasm \
-        nasm \
-        libgnutls28-dev \
     && apt-get upgrade -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # -------- FFmpeg source build (LGPL, OSRB-cleared codec allow-list) --------
 # Apache 2.0 posture: no GPL/nonfree. Upstream source tarballs preserved
 # under /usr/share/oss-sources/source-builds/ for OSS compliance.
-ARG FFMPEG_VERSION=8.1
-ARG FFMPEG_SHA256=b072aed6871998cce9b36e7774033105ca29e33632be5b6347f3206898e0756a
+ARG FFMPEG_VERSION=9.0.1
+ARG FFMPEG_SHA256=cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635
 ARG NV_CODEC_HEADERS_VERSION=n12.1.14.0
+ARG NV_CODEC_HEADERS_COMMIT=1889e62e2d35ff7aa9baca2bceb14f053785e6f1
 RUN set -euxo pipefail; \
     mkdir -p /tmp/ffmpeg-build /usr/share/oss-sources/source-builds && cd /tmp/ffmpeg-build; \
-    git clone --depth 1 --branch "${NV_CODEC_HEADERS_VERSION}" https://github.com/FFmpeg/nv-codec-headers.git; \
+    for attempt in 1 2 3 4 5; do \
+        git clone https://github.com/FFmpeg/nv-codec-headers.git && \
+            git -C nv-codec-headers checkout "${NV_CODEC_HEADERS_COMMIT}" && break; \
+        rm -rf nv-codec-headers; \
+        [ "$attempt" = 5 ] && { echo "nv-codec-headers clone failed after 5 attempts"; exit 1; }; \
+        sleep $((attempt * 3)); \
+    done; \
     tar -C /tmp/ffmpeg-build --exclude='.git' \
         -czf "/usr/share/oss-sources/source-builds/nv-codec-headers-${NV_CODEC_HEADERS_VERSION}.tar.gz" nv-codec-headers; \
     make -C nv-codec-headers -j"$(nproc)" && make -C nv-codec-headers install; \
-    curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" -o ffmpeg.tar.xz; \
+    `# --retry alone will NOT retry a mid-transfer reset (curl exit 56/35), which` \
+    `# is how ffmpeg.org intermittently fails this ~11MB fetch; --retry-all-errors` \
+    `# is the flag that covers it.` \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 \
+         --connect-timeout 20 --max-time 600 \
+         "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" -o ffmpeg.tar.xz; \
     echo "${FFMPEG_SHA256}  ffmpeg.tar.xz" | sha256sum -c -; \
     cp ffmpeg.tar.xz "/usr/share/oss-sources/source-builds/ffmpeg-${FFMPEG_VERSION}.tar.xz"; \
     tar -xf ffmpeg.tar.xz; \
@@ -77,15 +90,28 @@ RUN set -euxo pipefail; \
       --disable-nonfree --disable-gpl --disable-vulkan --disable-cuda-nvcc \
       `# OSRB allow-list (2026-05-23): H.264 is HW-only; SW h264 stays off` \
       `# because MPEG-LA AVC covers decode as well as encode.` \
+      `# VP9 (2026-07-28) is royalty-free -- no patent pool -- so both the native` \
+      `# SW decoder and the libvpx encoder fit the LGPL/Apache-2.0 no-nonfree` \
+      `# posture (libvpx is BSD-3-Clause; --enable-libvpx needs no --enable-gpl).` \
+      `# VIDEO OUTPUT IS VP9-ONLY (UAL parity): the h264_nvenc and mpeg4 encoders` \
+      `# were dropped so augmentation cannot emit H.264/MPEG-4 Part 2. mjpeg stays` \
+      `# for jpg image output; rawvideo for uncompressed interchange. H.264 and` \
+      `# MPEG-4 remain readable (decoders kept) -- input support is unchanged.` \
       --disable-encoders --disable-decoders --disable-everything \
-      --enable-encoder=h264_nvenc --enable-encoder=mpeg4 --enable-encoder=mjpeg \
+      --enable-encoder=mjpeg \
+      --enable-libvpx --enable-encoder=libvpx_vp9 --enable-encoder=rawvideo \
       --enable-decoder=h264_cuvid --enable-decoder=mpeg4 --enable-decoder=mjpeg \
-      --enable-nvenc --enable-nvdec \
+      --enable-decoder=vp9 --enable-decoder=vp9_cuvid \
+      --enable-nvdec \
       `# Cosmos read/write IO scaffolding` \
       --enable-protocol=file \
       --enable-demuxer=mov \
       --enable-muxer=mp4 --enable-muxer=image2 \
-      --enable-parser=h264 --enable-bsf=h264_mp4toannexb \
+      `# vp9_superframe is what the mp4 muxer auto-inserts for VP9; request it` \
+      `# explicitly rather than relying on implicit selection under` \
+      `# --disable-everything.` \
+      --enable-parser=h264 --enable-parser=vp9 \
+      --enable-bsf=h264_mp4toannexb --enable-bsf=vp9_superframe \
       --enable-filter=fps --enable-filter=scale --enable-filter=format \
       `# imageio_ffmpeg encoder probe: ffmpeg -f lavfi -i nullsrc -vcodec X -f null -` \
       --enable-indev=lavfi --enable-filter=nullsrc \
@@ -102,201 +128,108 @@ RUN set -euxo pipefail; \
     ! ffmpeg -buildconf | grep -E "enable-gpl|enable-nonfree"; \
     # Assert every --enable-X flag actually produced a working component. \
     # Format: <section>:<name>  (section is the ffmpeg listing flag, minus the trailing 's'). \
-    for c in encoders:h264_nvenc encoders:mpeg4 encoders:mjpeg \
-             decoders:h264_cuvid decoders:mpeg4 decoders:mjpeg \
+    for c in encoders:mjpeg encoders:libvpx-vp9 encoders:rawvideo \
+             decoders:h264_cuvid decoders:mpeg4 decoders:mjpeg decoders:vp9 \
+             decoders:vp9_cuvid \
              decoders:wrapped_avframe decoders:rawvideo \
              demuxers:mov demuxers:rawvideo \
              muxers:mp4 muxers:image2 muxers:null \
              protocols:file protocols:pipe protocols:fd \
-             devices:lavfi bsfs:h264_mp4toannexb \
+             devices:lavfi bsfs:h264_mp4toannexb bsfs:vp9_superframe \
              filters:fps filters:scale filters:format filters:nullsrc; do \
         sec="${c%:*}"; name="${c#*:}"; \
         ffmpeg -hide_banner "-${sec}" 2>/dev/null | grep -qE "\\b${name}\\b" \
             || { echo "MISSING: ${name} in ${sec}"; exit 1; }; \
     done; \
-    # End-to-end smoke test: lavfi -> wrapped_avframe -> mpeg4 -> null muxer via fd. \
-    ffmpeg -hide_banner -f lavfi -i nullsrc=s=256x256:d=8 -vcodec mpeg4 -f null - \
-        || { echo "ERROR: encoder-probe smoke test failed"; exit 1; }
+    # Video output is VP9-only: assert the H.264/MPEG-4 ENCODERS are gone, so a \
+    # future flag change can't silently reintroduce a non-VP9 output path. \
+    # (Their DECODERS must stay -- input support is unchanged -- so this checks \
+    # the encoder listing only.) \
+    for name in h264_nvenc mpeg4 h263; do \
+        ! ffmpeg -hide_banner -encoders 2>/dev/null | grep -qE "\\b${name}\\b" \
+            || { echo "UNEXPECTED: ${name} encoder present (output must be VP9-only)"; exit 1; }; \
+    done; \
+    # End-to-end smoke test: lavfi -> wrapped_avframe -> rawvideo -> null muxer via fd. \
+    ffmpeg -hide_banner -f lavfi -i nullsrc=s=256x256:d=8 -vcodec rawvideo -f null - \
+        || { echo "ERROR: encoder-probe smoke test failed"; exit 1; }; \
+    # VP9 output round-trip: encode VP9 into MP4, then decode it back. Proves the \
+    # libvpx_vp9 encoder + mp4 muxer + native vp9 decoder all work together. The \
+    # read-back runs without a GPU, so it also asserts VP9 decode stays software \
+    # (adding vp9_cuvid must not make VP9 decode GPU-only). \
+    ffmpeg -hide_banner -y -f lavfi -i nullsrc=s=64x64:d=1 -vcodec libvpx-vp9 \
+        -frames:v 2 /tmp/vp9_smoke.mp4 \
+        || { echo "ERROR: VP9 encode smoke test failed"; exit 1; }; \
+    # Re-encode with rawvideo rather than the null muxer's default: the \
+    # wrapped_avframe ENCODER is not in the allow-list, so `-f null -` alone \
+    # would fail on encoder selection before ever decoding. \
+    ffmpeg -hide_banner -v error -i /tmp/vp9_smoke.mp4 -vcodec rawvideo -f null - \
+        || { echo "ERROR: VP9 decode round-trip smoke test failed"; exit 1; }; \
+    rm -f /tmp/vp9_smoke.mp4
 
 RUN apt-get purge -y --auto-remove yasm nasm && rm -rf /var/lib/apt/lists/*
 
-# Pick the yq binary + checksum for the target arch.
-ARG TARGETARCH
-ENV YQ_VERSION=v4.52.2
-ENV YQ_BINARY=yq_linux_${TARGETARCH}
-ARG YQ_SHA256_amd64=6acbc0ee0ce7d457c64407acc44a9607fff065cc436433407e27e7370c51a694
-ARG YQ_SHA256_arm64=0cb66b6b49512ee1037487f139d0c531cfc34d532da365d417ccc21b4a715787
-RUN mkdir -p /usr/share/oss-sources && \
-    case "${TARGETARCH}" in \
-        amd64) YQ_SHA256="${YQ_SHA256_amd64}" ;; \
-        arm64) YQ_SHA256="${YQ_SHA256_arm64}" ;; \
-        *) echo "Unsupported TARGETARCH for yq: '${TARGETARCH}'" >&2; exit 1 ;; \
-    esac && \
-    wget -qO /tmp/yq.tar.gz "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${YQ_BINARY}.tar.gz" && \
-    echo "${YQ_SHA256}  /tmp/yq.tar.gz" | sha256sum -c - && \
-    tar -xzf /tmp/yq.tar.gz && rm /tmp/yq.tar.gz && \
-    mv ${YQ_BINARY} /usr/local/bin/yq && \
-    curl -fsSL "https://github.com/mikefarah/yq/archive/refs/tags/${YQ_VERSION}.tar.gz" \
-        -o "/usr/share/oss-sources/yq-${YQ_VERSION}.tar.gz"
-
-# Install uv system-wide. Pinned to 0.11.10 (first release whose bundled
-# rustls-webpki >= 0.103.13). astral.sh/uv/<ver>/install.sh redirects to
-# releases.astral.sh, which BuildKit's ADD does not follow — use the official
-# uv multistage image instead (the documented pinning pattern).
-COPY --from=ghcr.io/astral-sh/uv:0.11.10 /uv /uvx /usr/local/bin/
+# Install uv system-wide. Tag + multi-arch manifest digest pinned so the copied
+# binary can't drift from the archived source tarball, and ARM64 stays intact.
+COPY --from=ghcr.io/astral-sh/uv:0.12.5@sha256:e85be844203885286c60ffad8a858d48afb6c5a5c237ca0e67f12e74b8f174b1 /uv /uvx /usr/local/bin/
 ENV PATH="/usr/local/bin:$PATH"
-ENV UV_HOME=/opt/uv
-ARG UV_VERSION=0.11.10
+# Put uv and Python in a location we can chown for the non-root user. Use a
+# disposable cache outside /root from the first build-time invocation so
+# bundled libraries from prebuilt wheels cannot survive in the final image as
+# scan-only artifacts.
+ENV UV_HOME=/opt/uv \
+    UV_CACHE_DIR=/tmp/uv-cache
+# uv installs managed CPython here instead of the default ~/.local/share/uv
+# (under /root, mode 700) which the non-root runtime user cannot traverse —
+# otherwise `uv run` fails to canonicalize the venv interpreter symlink. /opt/uv
+# is chowned to the nvidia user further down, so the interpreter resolves.
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
+ARG UV_VERSION=0.12.5
 RUN mkdir -p /opt/uv /usr/share/oss-sources && \
     curl -fsSL "https://github.com/astral-sh/uv/archive/refs/tags/${UV_VERSION}.tar.gz" \
         -o "/usr/share/oss-sources/uv-${UV_VERSION}.tar.gz"
 
-# Install Python 3.13 (cosmos-transfer2.5 main + cosmos-predict2.5 v1.5.2 both
-# declare .python-version=3.13 and route 3.13 builds through cosmos-dependencies/v1.5.0).
-ARG PYTHON_VERSION=3.13.13
-RUN uv python install ${PYTHON_VERSION} && \
-    mkdir -p /usr/share/oss-sources && \
+WORKDIR /workspace
+
+# Copy source. This image is endpoint-only (no local Cosmos/torch inference):
+# all generation goes through the adapter/executor layer over remote endpoints.
+COPY modules /workspace/modules
+COPY configs /workspace/configs
+# Build from the committed lockfile (reviewed for OSRB/compliance) — do NOT
+# re-resolve at build time. `uv sync --locked` below fails if it drifts.
+COPY pyproject.toml uv.lock ./
+
+# Python 3.13 to match the repo's .python-version (3.13.15); pinned to a full
+# patch for reproducibility.
+ARG PYTHON_VERSION=3.13.15
+ARG PYTHON_SHA256=1e66a7945a48390ee4c2a4268a0e4185884059a13c4aab6d148aa208deea4a76
+# Install the requested CPython and preserve the matching upstream source
+# tarball for OSS compliance (PYTHON_VERSION is a full pinned patch version).
+RUN set -euxo pipefail; \
+    uv python install --no-cache "${PYTHON_VERSION}"; \
+    python_bin="$(uv python find --managed-python "${PYTHON_VERSION}")"; \
+    "${python_bin}" -c 'import pyexpat, sys; expected = tuple(map(int, sys.argv[1].split("."))); assert sys.version_info[:3] == expected, sys.version; assert pyexpat.version_info >= (2, 8, 0), pyexpat.EXPAT_VERSION' "${PYTHON_VERSION}"; \
+    mkdir -p /usr/share/oss-sources; \
     curl -fsSL "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz" \
-        -o "/usr/share/oss-sources/Python-${PYTHON_VERSION}.tar.xz"
-
-# Upgrade setuptools in uv's Python; `uv python find` avoids a hardcoded arch path.
-RUN PYBIN="$(uv python find ${PYTHON_VERSION})" && \
-    "${PYBIN}" -m pip install --no-cache-dir --break-system-packages --upgrade "setuptools>=80.9.0"
-
-# Clone cosmos-transfer2.5 from GitHub. Tracking `main` until the next release
-# tag is cut; switch back to a `vX.Y.Z` tag for reproducibility once available.
-ARG COSMOS_VERSION=v1.5.4
-RUN GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --branch ${COSMOS_VERSION} \
-    https://github.com/nvidia-cosmos/cosmos-transfer2.5.git /opt/cosmos-transfer2.5
-
-# Clone cosmos-predict2.5 from GitHub (pinned to stable release)
-ARG COSMOS_PREDICT_VERSION=v1.5.2
-RUN GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --branch ${COSMOS_PREDICT_VERSION} \
-    https://github.com/nvidia-cosmos/cosmos-predict2.5.git /opt/cosmos-predict2.5
-
-# Shared checkpoints (VAE, Qwen tokenizer, Reason1) are registered via
-# cosmos_oss.checkpoints into transfer2's checkpoint_db. Predict2 uses its own
-# checkpoint_db, so shared lookups fail at download time. Patch predict2's
-# download_checkpoint to fall back to transfer2's registry.
-RUN PYBIN="$(uv python find ${PYTHON_VERSION})" && "${PYBIN}" -c "\
-import pathlib; \
-p = pathlib.Path('/opt/cosmos-predict2.5/cosmos_predict2/_src/imaginaire/utils/checkpoint_db.py'); \
-t = p.read_text(); \
-old = '    if (checkpoint := CheckpointConfig.maybe_from_uri(checkpoint_uri)) is not None:\n        return checkpoint.download()'; \
-new = old + '''\n    try:\n        from cosmos_transfer2._src.imaginaire.utils.checkpoint_db import CheckpointConfig as _T2CC\n        if (checkpoint := _T2CC.maybe_from_uri(checkpoint_uri)) is not None:\n            return checkpoint.download()\n    except ImportError:\n        pass'''; \
-patched = t.replace(old, new, 1); \
-assert patched != t, 'Patch target not found in checkpoint_db.py - upstream may have changed'; \
-p.write_text(patched)"
-
-WORKDIR /app
-
-# Copy project and generate lock so nvidia user can run venv/sync
-COPY pyproject.toml ./
-RUN uv lock
-COPY modules /app/modules
-COPY configs /app/configs
-
-# Chown so nvidia can create venv and read Python/interpreter
-RUN chown -R nvidia:nvidia /app /opt/uv /opt/cosmos-transfer2.5 /opt/cosmos-predict2.5
-
-USER nvidia
-
-# Create venv and install as nvidia so .venv and interpreter paths are nvidia-owned
-RUN uv venv --python ${PYTHON_VERSION}
-
-# Replicate cosmos-transfer2.5/cosmos-predict2.5's [tool.uv] override-dependencies.
-# torch==2.9.1+cu130 pins nvidia-cudnn-cu13==9.13.0.50 while cosmos-oss[cu130_torch29]
-# pins 9.21.0.82; unresolvable without loosening torch's pin. Upstream's
-# override-dependencies setting is only honored when cosmos is the uv workspace
-# root, and `uv pip install -e` from /app ignores it — so we pass it explicitly.
-RUN echo 'nvidia-cudnn-cu13>=9.15.0' > /tmp/uv-overrides.txt
-
-# arm64: glcontext has no aarch64 wheel, so it builds from source and needs X11/GL/EGL headers.
-USER root
-RUN if [ "$(dpkg --print-architecture)" = "arm64" ]; then \
-        apt-get update \
-        && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            libx11-dev \
-            libgl1-mesa-dev \
-            libegl-dev \
-        && rm -rf /var/lib/apt/lists/*; \
-    fi
-USER nvidia
-
-RUN uv pip install --no-cache \
-    --link-mode=copy \
-    --override /tmp/uv-overrides.txt \
-    --extra-index-url https://download.pytorch.org/whl/cu130 \
-    --extra-index-url https://nvidia-cosmos.github.io/cosmos-dependencies/v1.5.0 \
-    --extra-index-url https://nvidia-cosmos.github.io/cosmos-dependencies/v1.2.0/cu130_torch29/simple \
-    --index-strategy unsafe-best-match \
-    -e "/opt/cosmos-transfer2.5[cu130]"
-RUN uv pip install --no-cache \
-    --link-mode=copy \
-    --override /tmp/uv-overrides.txt \
-    --extra-index-url https://download.pytorch.org/whl/cu130 \
-    --extra-index-url https://nvidia-cosmos.github.io/cosmos-dependencies/v1.5.0 \
-    --extra-index-url https://nvidia-cosmos.github.io/cosmos-dependencies/v1.2.0/cu130_torch29/simple \
-    --index-strategy unsafe-best-match \
-    -e "/opt/cosmos-predict2.5[cu130]"
-
-# Rename predict2's cosmos_oss so Python falls through to transfer2's cosmos_oss.
-# Then copy predict2's checkpoints_predict2.py (with HuggingFace URIs) into
-# transfer2's cosmos_oss, replacing transfer2's version (which has internal S3 URIs).
-RUN mv /opt/cosmos-predict2.5/packages/cosmos-oss/cosmos_oss \
-       /opt/cosmos-predict2.5/packages/cosmos-oss/cosmos_oss_predict2 && \
-    echo '/opt/cosmos-transfer2.5/packages/cosmos-oss' \
-        > /app/.venv/lib/python3.13/site-packages/_cosmos_oss.pth
-RUN cp /opt/cosmos-predict2.5/packages/cosmos-oss/cosmos_oss_predict2/checkpoints_predict2.py \
-       /opt/cosmos-transfer2.5/packages/cosmos-oss/cosmos_oss/checkpoints_predict2.py
-
-# PyTorch 2.9.0 unconditionally disables cuDNN for conv3d (vol2col fallback
-# uses ~17x more memory). 2.9.1 re-enables cuDNN conv3d when runtime
-# cuDNN >= 9.15 is detected (pytorch/pytorch#166480, #166643).
-RUN uv pip install --no-cache --link-mode=copy \
-    --extra-index-url https://download.pytorch.org/whl/cu130 \
-    --index-strategy unsafe-best-match \
-    "torch==2.9.1"
-RUN uv pip install --no-cache --link-mode=copy "nvidia-cudnn-cu13>=9.15"
-RUN uv pip install --no-cache --link-mode=copy "iopath>=0.1.10"
-
-RUN uv sync --locked --inexact --no-cache --python ${PYTHON_VERSION} --link-mode=copy
-
-# diffusers 0.38.0 requires safetensors>=0.8.0rc0 (only released as pre-release
-# at time of pin); --prerelease=allow lets uv pick it up. Scope is this single
-# `uv pip install` invocation.
-RUN uv pip install --no-cache --link-mode=copy --prerelease=allow \
-    "nltk>=3.9.3" \
-    "transformers>=4.53.0,<5.0" \
-    "diffusers==0.38.0" \
-    "setuptools>=80.9.0" \
-    "wheel>=0.46.2" \
-    "pytz>=2024.1"
-# pytz: cosmos_transfer2._src.predict2.callbacks.heart_beat imports pytz
-# directly. It used to come in transitively via pandas on Python 3.10; pandas
-# 2.x dropped the pytz dep on Python 3.13 (zoneinfo is in stdlib), so pin
-# explicitly.
-
-# cupy-cuda13x: required for data_processing.alignment MI search (GPU-only).
-# Matches the cuda:13 base. Pinned for OSRB scanning and reproducibility.
-RUN uv pip install --no-cache --link-mode=copy "cupy-cuda13x==14.0.1"
+        -o "/usr/share/oss-sources/Python-${PYTHON_VERSION}.tar.xz"; \
+    echo "${PYTHON_SHA256}  /usr/share/oss-sources/Python-${PYTHON_VERSION}.tar.xz" | sha256sum -c -
+# The Linux wheels for PyAV and OpenCV bundle private FFmpeg builds. Skip those
+# two packages here; the controlled source builds below install them without
+# introducing duplicate FFmpeg copies into uv's cache or the virtualenv.
+RUN uv sync --locked --python ${PYTHON_VERSION} --link-mode=copy --no-dev \
+        --no-install-package av \
+        --no-install-package opencv-python-headless \
+        --no-cache
 
 # -------- OpenCV: rebuild from sdist with WITH_FFMPEG=OFF (Apache 2.0 release) --------
-# PyPI opencv-python(-headless) wheels ship their own bundled FFmpeg .so files,
-# which the scanner detects independently of our /usr/local FFmpeg. Force a
-# CMake source build with WITH_FFMPEG=OFF; video I/O lives in PyAV (next step).
-# Pinned to match pseudo-labeling for known-good scan posture.
 ARG OPENCV_PYTHON_VERSION=4.12.0.88
 RUN set -euxo pipefail; \
-    uv pip uninstall opencv-python opencv-python-headless \
-        opencv-contrib-python opencv-contrib-python-headless 2>/dev/null || true; \
-    rm -rf /app/.venv/lib/python3.13/site-packages/cv2 \
-           /app/.venv/lib/python3.13/site-packages/opencv_python.libs \
-           /app/.venv/lib/python3.13/site-packages/opencv_python-*.dist-info \
-           /app/.venv/lib/python3.13/site-packages/opencv_python_headless.libs \
-           /app/.venv/lib/python3.13/site-packages/opencv_python_headless-*.dist-info \
-           /app/.venv/lib/python3.13/site-packages/opencv_contrib_python*.dist-info \
-           /app/.venv/lib/python3.13/site-packages/opencv_contrib_python*.libs; \
+    rm -rf /workspace/.venv/lib/python3.13/site-packages/cv2 \
+           /workspace/.venv/lib/python3.13/site-packages/opencv_python.libs \
+           /workspace/.venv/lib/python3.13/site-packages/opencv_python-*.dist-info \
+           /workspace/.venv/lib/python3.13/site-packages/opencv_python_headless.libs \
+           /workspace/.venv/lib/python3.13/site-packages/opencv_python_headless-*.dist-info \
+           /workspace/.venv/lib/python3.13/site-packages/opencv_contrib_python*.dist-info \
+           /workspace/.venv/lib/python3.13/site-packages/opencv_contrib_python*.libs; \
     uv pip install --no-cache --link-mode=copy \
         "setuptools>=80.9.0" "wheel>=0.46.2" \
         "scikit-build>=0.18,<1" "cmake>=3.27,<4" "numpy>=2.1.0,<3" "pip>=25.3"
@@ -304,74 +237,26 @@ RUN set -euxo pipefail; \
     ENABLE_CONTRIB=0 \
     ENABLE_HEADLESS=1 \
     CMAKE_ARGS="-DWITH_FFMPEG=OFF -DWITH_GSTREAMER=OFF -DWITH_V4L=OFF -DWITH_LIBV4L=OFF -DWITH_QT=OFF -DWITH_GTK=OFF -DOPENCV_ENABLE_NONFREE=OFF -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF" \
-    /app/.venv/bin/python -m pip install --no-cache-dir --no-build-isolation \
+    /workspace/.venv/bin/python -m pip install --no-cache-dir --no-build-isolation \
         --no-binary=opencv-python \
         "opencv-python==${OPENCV_PYTHON_VERSION}"
-RUN /app/.venv/bin/python -c "import re, sys, cv2; info = cv2.getBuildInformation(); sys.exit('OpenCV unexpectedly built WITH FFmpeg') if re.search(r'FFMPEG:\\s+YES', info) else print('cv2', cv2.__version__, 'WITH_FFMPEG=OFF OK')" && \
-    ! find /app/.venv/lib/python3.13/site-packages -name 'cv2*.so' -exec ldd {} \; \
+RUN /workspace/.venv/bin/python -c "import re, sys, cv2; info = cv2.getBuildInformation(); sys.exit('OpenCV unexpectedly built WITH FFmpeg') if re.search(r'FFMPEG:\\s+YES', info) else print('cv2', cv2.__version__, 'WITH_FFMPEG=OFF OK')" && \
+    ! find /workspace/.venv/lib/python3.13/site-packages -name 'cv2*.so' -exec ldd {} \; \
         | grep -E 'libav(codec|device|filter|format|util)|libswresample|libswscale'
 
-# -------- PyAV: source build linked to /usr/local LGPL FFmpeg 8.1 --------
-# PyPI `av` wheels bundle their own FFmpeg .so files (often GPL). Build from
-# the upstream git tag against our /usr/local FFmpeg so the resulting av.so
-# links the LGPL build we control. Version pinned to match pseudo-labeling.
-ARG PYAV_VERSION=16.1.0
+# -------- PyAV: source build linked to /usr/local LGPL FFmpeg --------
+ARG PYAV_VERSION=18.1.0
 RUN set -euxo pipefail; \
-    uv pip uninstall av 2>/dev/null || true; \
-    rm -rf /app/.venv/lib/python3.13/site-packages/av \
-           /app/.venv/lib/python3.13/site-packages/av-*.dist-info \
-           /app/.venv/lib/python3.13/site-packages/av.libs; \
+    rm -rf /workspace/.venv/lib/python3.13/site-packages/av \
+           /workspace/.venv/lib/python3.13/site-packages/av-*.dist-info \
+           /workspace/.venv/lib/python3.13/site-packages/av.libs; \
     uv pip install --no-cache --link-mode=copy \
         "setuptools>=80.9.0" "cython>=3.1.0,<4" "pip>=25.3"; \
     PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}" \
-    /app/.venv/bin/python -m pip install --no-cache-dir --no-build-isolation \
+    /workspace/.venv/bin/python -m pip install --no-cache-dir --no-build-isolation \
         --no-binary av \
         "av==${PYAV_VERSION}"; \
-    /app/.venv/bin/python -c "import av, av._core; print('pyav', av.__version__, 'core', av._core.__file__)"
-
-# Defensive scan: fail if any opencv_python*.libs/libav* slipped back in via a
-# later wheel install (would silently reintroduce a bundled FFmpeg).
-RUN set -euxo pipefail; \
-    leftovers="$(find /app/.venv/lib/python3.13/site-packages \( \
-        -path '*opencv_python*.libs/libavcodec*' -o \
-        -path '*opencv_python*.libs/libavdevice*' -o \
-        -path '*opencv_python*.libs/libavfilter*' -o \
-        -path '*opencv_python*.libs/libavformat*' -o \
-        -path '*opencv_python*.libs/libavutil*' -o \
-        -path '*opencv_python*.libs/libswresample*' -o \
-        -path '*opencv_python*.libs/libswscale*' \
-        -o -path '*av.libs/libav*' \
-        \) -print 2>/dev/null || true)"; \
-    if [ -n "$leftovers" ]; then echo "$leftovers"; exit 1; fi
-
-# Remove the GPL-enabled ffmpeg bundled by imageio-ffmpeg (installed via cosmos).
-# The container uses our LGPL source-built ffmpeg in /usr/local/bin instead.
-RUN rm -rf /app/.venv/lib/python3.13/site-packages/imageio_ffmpeg/binaries/ffmpeg-*
-ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
-
-# Patch imageio_ffmpeg for non-NVENC GPUs (A100/H100): fall back to mpeg4
-# (royalty-free, in our LGPL ffmpeg) when no H.264 encoder works, and pair
-# -bufsize with -maxrate (mpeg4 rejects -bufsize alone).
-RUN F=/app/.venv/lib/python3.13/site-packages/imageio_ffmpeg/_io.py \
- && sed -i -z 's|    else:\n        raise RuntimeError(\n            "No valid H.264|    if ffmpeg_test_encoder("mpeg4"):\n        return "mpeg4"\n    raise RuntimeError(\n            "No valid H.264|' "$F" \
- && sed -i -z 's|    cmd += \["-v", ffmpeg_log_level\]\n    cmd += output_params|&\n    if "-b:v" in cmd and "-bufsize" in cmd and "-maxrate" not in cmd:\n        cmd += ["-maxrate", cmd[cmd.index("-b:v") + 1]]|' "$F" \
- && grep -q 'ffmpeg_test_encoder("mpeg4")' "$F"
-
-# -------- Stub decord (no FFmpeg 6 sonames in the image) --------
-# decord 0.6.0 is C-linked to libav*.so.60 (FFmpeg 6); we ship FFmpeg 8 only.
-# Cosmos imports decord at module top but never calls it during inference, so
-# replace site-packages/decord with a stub that errors only if used (training
-# paths, which this image does not ship).
-RUN find /app/.venv/lib/python3.13/site-packages/decord -mindepth 1 -delete
-COPY --chown=nvidia:nvidia docker/decord_stub.py \
-     /app/.venv/lib/python3.13/site-packages/decord/__init__.py
-RUN /app/.venv/bin/python -c "import decord; from decord import VideoReader, cpu; print('decord stub OK', decord.__version__)"
-
-# Clean nvidia's uv cache before switching user
-RUN uv cache clean
-
-# -------- Harden: patch system Pythons & purge build-only packages --------
-USER root
+    /workspace/.venv/bin/python -c "import av, av._core; print('pyav', av.__version__, 'core', av._core.__file__)"
 
 # Preserve sdists for the python packages we source-built, alongside FFmpeg/
 # nv-codec-headers sources under /usr/share/oss-sources/source-builds/. The
@@ -390,16 +275,34 @@ RUN set -e; \
         echo "${sha}  ${out}" | sha256sum -c -; \
     done
 
-# Upgrade setuptools in every uv-managed Python the scanner can reach.
-RUN for p in /root/.local/share/uv/python/cpython-*/bin/python3.* \
-             /home/nvidia/.local/share/uv/python/cpython-*/bin/python3.*; do \
-        [ -x "$p" ] && "$p" -m pip install --no-cache-dir --break-system-packages \
-            --upgrade "setuptools>=80.9.0" 2>/dev/null || true; \
-    done
+# Defensive scan: fail if any opencv_python*.libs/libav* slipped back in.
+RUN set -euxo pipefail; \
+    leftovers="$(find /workspace/.venv/lib/python3.13/site-packages \( \
+        -path '*opencv_python*.libs/libavcodec*' -o \
+        -path '*opencv_python*.libs/libavdevice*' -o \
+        -path '*opencv_python*.libs/libavfilter*' -o \
+        -path '*opencv_python*.libs/libavformat*' -o \
+        -path '*opencv_python*.libs/libavutil*' -o \
+        -path '*opencv_python*.libs/libswresample*' -o \
+        -path '*opencv_python*.libs/libswscale*' \
+        -o -path '*av.libs/libav*' \
+        \) -print 2>/dev/null || true)"; \
+    if [ -n "$leftovers" ]; then echo "$leftovers"; exit 1; fi
 
-RUN uv cache clean
+# -------- cupy: GPU MI alignment for data_processing (Defect Image Generation use case) --------
+# modules/data_processing/alignment.py requires cupy (GPU-only). The CUDA 13
+# devel base provides the runtime libraries, so no `[ctk]` extra is needed. The
+# host driver (libcuda.so) is provided at runtime via `--gpus`. Version pinned
+# for OSRB scanning and reproducibility.
+RUN uv pip install --no-cache --link-mode=copy "cupy-cuda13x==14.0.1"
 
-# Remove build-only packages to shrink the attack surface.
+# Build caches are not runtime dependencies. Keep them out of the final rootfs
+# and assert that the historical root-owned uv cache cannot regress unnoticed.
+RUN rm -rf /root/.cache/uv /tmp/uv-cache && \
+    test ! -e /root/.cache/uv && \
+    test ! -e /tmp/uv-cache
+
+# Remove build-only packages to shrink attack surface.
 RUN apt-get update \
     && apt-get purge -y --auto-remove \
         build-essential \
@@ -407,18 +310,22 @@ RUN apt-get update \
         ninja-build \
         pkg-config \
         git \
-        git-lfs \
-        wget \
-        unzip \
-        gnupg \
-        gnupg2 \
         libgnutls28-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Ensure non-root user can use the app and venv interpreter (UV_HOME)
+RUN chown -R nvidia:nvidia /workspace /opt/uv
+
 USER nvidia
 
-COPY --chown=nvidia:nvidia LICENSE-3rd-party.txt VERSION /app/
-RUN cp /NGC-DL-CONTAINER-LICENSE /app/NGC-DL-CONTAINER-LICENSE
+# UV_CACHE_DIR above is writable for arbitrary runtime UIDs. Disable auto-sync
+# since the venv is baked and the source mount may be read-only.
+ENV UV_NO_SYNC=1
+
+# Third-party / container license attribution (OSS compliance), same as the
+# full image. NGC-DL-CONTAINER-LICENSE ships in the CUDA base at /.
+COPY --chown=nvidia:nvidia LICENSE-3rd-party.txt VERSION /workspace/
+RUN cp /NGC-DL-CONTAINER-LICENSE /workspace/NGC-DL-CONTAINER-LICENSE
 
 # Default entrypoint runs Python; override CMD to choose script
-ENTRYPOINT ["uv", "run", "--no-sync", "/app/modules/cli.py"]
+ENTRYPOINT ["uv", "run", "--no-sync", "/workspace/modules/cli.py"]

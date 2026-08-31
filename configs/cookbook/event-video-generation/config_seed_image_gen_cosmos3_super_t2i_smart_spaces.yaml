@@ -1,0 +1,236 @@
+data:
+  - inputs:
+      # Text-to-image seed generation does not require an input image.
+      rgb: null
+    output:
+      # The pipeline schema uses "video" as the generic output media field.
+      # For this template, point it to an image path.
+      video: "/workspace/data/out/smart_spaces_seed_retail.png"
+      caption: "/workspace/data/out/smart_spaces_seed_retail_prompt.txt"
+      metadata: "/workspace/data/out/smart_spaces_seed_retail_metadata.json"
+
+endpoints:
+  - id: seed_prompt_generation_llm
+    role: llm
+    # Placeholder for the LLM used to expand a short user environment
+    # description into the final Cosmos 3 Super T2I prompt.
+    url: "http://localhost:8000/v1"
+    model: "${oc.env:LLM_ENDPOINT_MODEL,''}"
+    adapter: openai.chat.completions
+    timeout: 900
+    api_key_env: LLM_API_KEY
+
+  - id: cosmos3-super-text2image
+    role: video_predict
+    # Placeholder for a Cosmos 3 Super T2I endpoint. Keep /v1 here when the
+    # endpoint exposes an OpenAI-compatible chat route.
+    url: "http://localhost:8000/v1"
+    model: "nvidia/Cosmos3-Super-Text2Image"
+    adapter: openai.chat.completions
+    timeout: 900
+    api_key_env: BUILD_NVIDIA_API_KEY
+
+pipeline:
+  retry: 1
+  regenerate_caption_on_retry: false
+  logging:
+    enabled: true
+    level: "INFO"
+
+captioning:
+  llm:
+    endpoint_id: seed_prompt_generation_llm
+    # Component 1: prompt expansion LLM.
+    # The user only needs to provide env_type and/or env_description below.
+    # The LLM expands that short input into the final detailed T2I prompt.
+    system_prompt: |
+      You are an expert prompt writer for generating realistic security-camera
+      seed images for Smart Spaces video anomaly generation.
+
+      Convert the provided environment type and environment description into
+      one detailed text-to-image prompt for Cosmos 3 Super T2I. The prompt must
+      describe a realistic fixed security-camera still image from a lower
+      wall-mounted corner or upper-wall viewpoint, with a close medium-wide
+      optical crop and the camera looking slightly downward across the requested
+      environment. The camera should feel closer to the people and reachable
+      objects than a typical distant CCTV overview, while still preserving clear
+      scene context. The actual CCTV camera must never be visible. This is a
+      photo captured from the security-camera viewpoint, not a photo of a CCTV
+      camera or any wall-mounted device.
+
+      The prompt must make the camera viewpoint unambiguous: fixed upper-wall
+      corner surveillance view, static camera, about 2.2 to 2.7 meters above the
+      floor, tilted downward around 25 to 35 degrees, looking into the room or
+      scene from a close aisle/counter distance. Do not place the camera near
+      the ceiling, and do not use a top-down or bird's-eye view. Use a close
+      medium-wide crop: people should appear large and readable, nearby hands,
+      pockets, bags, baskets, shelves, counters, and small retail objects should
+      be clearly visible, while the scene still remains identifiable. Frame the
+      image so the environment, people, walls, shelves, equipment, floor, and
+      lighting are visible; do not make the top of the frame mostly ceiling or a
+      close foreground surface. The image must show only the retail scene, not
+      the recording equipment. Do not include any dome camera, box camera, wall
+      camera, lens, camera body, camera mount, mounting bracket, cable,
+      recording device, wall-mounted device in the foreground, camera
+      reflection, timestamp, UI overlay, watermark, or readable brand text.
+
+      Use the user's environment exactly as the subject of the scene. If the
+      user provides only a broad type such as warehouse, retail store, hospital,
+      school, airport, office, or factory, expand it into a plausible detailed
+      static-camera environment with objects, layout, lighting, background, and
+      normal activity that match that environment. Do not switch to a retail
+      store unless the user requested a retail setting.
+
+      Include detailed environment context appropriate to the requested setting:
+      aisles, racks, shelves, counters, doors, windows, entrance or exit areas,
+      equipment, product displays, storage areas, floor markings, polished or
+      industrial floor surfaces, ceiling lights, and signage without readable
+      brand text when relevant.
+
+      For retail or convenience-store seed images, the final prompt must include
+      the following structure and all of these elements:
+      - Realistic fixed security-camera still image from a lower wall-mounted
+        corner or upper-wall viewpoint, close medium-wide optical crop, camera
+        about 2.2 to 2.7 meters above the floor and tilted downward around 25 to
+        35 degrees across a convenience store or retail store.
+      - The actual CCTV camera must not be visible. This is a photo captured by
+        CCTV, not a photo of a CCTV camera.
+      - The frame must not contain any camera body, dome, lens, bracket, mount,
+        cable, foreground wall device, or recording equipment.
+      - Environment: a specific retail setting variation.
+      - Detailed store context: aisles, shelves, checkout counter,
+        refrigerators, entrance/exit door, product displays, polished floor,
+        ceiling lights, and signage without readable brand text.
+      - Keep the store entrance/exit door and threshold clearly visible when
+        the requested scene is retail or convenience-store related.
+      - Include reachable small generic packaged retail items on shelves,
+        counters, endcaps, or refrigerated displays. These items should be
+        close enough to be readable as small handheld products, not tiny distant
+        shelf texture.
+      - Subjects: 2-3 realistic adult people in the frame, full body visible
+        where possible, occupying about 65-75% of the visual attention without
+        blocking the environment.
+      - Natural poses, casual clothing, realistic scale, normal
+        surveillance-camera perspective.
+      - At least one adult should have a visible jacket pocket, pants pocket,
+        backpack, purse, handbag, or other personal bag that is spatially
+        readable, but do not show any theft, concealment, chase, or alarm in
+        the seed still image.
+      - Style: photorealistic, natural indoor lighting, CCTV/security footage
+        look, slightly wide angle, static camera, high-resolution, no cartoon
+        style, no illustration.
+      - Negative prompt used conceptually: cartoon, illustration, anime, CGI, 3D
+        render, visible security camera, photo of camera, fisheye extreme
+        distortion, close-up portrait, cropped people, missing feet, blurry
+        face, unrealistic anatomy, extra limbs, unreadable warped bodies,
+        watermark, logo, readable text, floating objects, empty store, no
+        people, low detail, dramatic cinematic angle.
+
+      Include 2-3 realistic adult people in the frame, full body visible where
+      possible, occupying about 65-75% of the visual attention without blocking
+      the environment. Treat this 65-75% composition as a strict requirement:
+      people, hands, pockets, bags, baskets, and nearby handled objects should
+      be large and readable enough for later video anomaly generation, while key
+      scene objects, doors, shelves, counters, and floor space remain clearly
+      visible. Use natural poses, casual or environment-appropriate clothing,
+      realistic scale, and normal surveillance-camera perspective. Do not make
+      it an eye-level shot, close-up portrait, distant overhead overview,
+      ceiling-mounted camera view, bird's-eye view, or extreme wide shot.
+
+      Style requirements: photorealistic, natural lighting matching the
+      requested environment, CCTV/security footage look, slightly wide angle,
+      static camera, high-resolution, no cinematic framing, no dramatic angle,
+      no cartoon style, no illustration.
+
+      Negative constraints: cartoon, illustration, anime, CGI, 3D render,
+      visible security camera, dome camera, box camera, wall camera, photo of
+      camera, camera lens, camera body, camera mount, mounting bracket, camera
+      cable, foreground wall device, recording device, camera reflection,
+      fisheye extreme distortion, close-up portrait, cropped people, missing
+      feet, blurry face, unrealistic anatomy, extra limbs, unreadable warped
+      bodies, timestamp, UI overlay, watermark, logo, readable text, floating
+      objects, empty scene, no people, low detail, dramatic cinematic angle,
+      stylized filter.
+
+      Output only a JSON object with one key: "prompt".
+    variables:
+      # User-facing inputs. Override these values for the target seed-image
+      # environment, for example:
+      # env_type: ["warehouse"]
+      # env_description: ["warehouse receiving area with pallet racks, forklifts, stacked boxes, loading dock doors, floor markings, and 2-3 adult workers"]
+      env_type:
+        - "retail store"
+      env_description:
+        - |
+          Realistic fixed security-camera still image from a lower wall-mounted
+          corner or upper-wall viewpoint, close medium-wide optical crop, camera
+          about 2.2 to 2.7 meters above the floor and tilted downward around 25
+          to 35 degrees across a convenience store or retail store. The
+          viewpoint is closer and more zoomed-in than a standard distant CCTV
+          overview, but still not a close-up. Do not place the camera near the
+          ceiling and do not use a top-down or bird's-eye view. The actual CCTV
+          camera must never be visible. This is a photo captured from the
+          security-camera viewpoint, not a photo of a CCTV camera or any
+          wall-mounted device. The frame must not contain any camera body, dome,
+          lens, bracket, mount, cable, foreground wall device, or recording
+          equipment.
+
+          Environment: specific retail setting variation.
+          Include detailed store context: aisles, shelves, checkout counter,
+          refrigerators, entrance/exit door, product displays, polished floor,
+          ceiling lights, signage without readable brand text. Keep the store
+          entrance/exit door and threshold clearly visible. Include reachable
+          small generic packaged retail items on shelves, counters, endcaps, or
+          refrigerated displays. Nearby small packaged products should be large
+          enough to be visually readable as individual handheld items.
+
+          Subjects: 2-3 realistic adult people in the frame, full body visible
+          where possible, occupying about 65-75% of the visual attention without
+          blocking the environment. Natural poses, casual clothing, realistic
+          scale, normal surveillance-camera perspective. People, hands, pockets,
+          bags, baskets, and nearby handheld items should be large and readable.
+          At least one adult should have a visible jacket pocket, pants pocket,
+          backpack, purse, handbag, or other personal bag that is spatially
+          readable. Do not show theft, concealment, chase, alarm, checkout
+          payment, receipt exchange, or security intervention in the seed still
+          image.
+
+          Style: photorealistic, natural indoor lighting, CCTV/security footage
+          look, slightly wide angle, static camera, high-resolution, no cartoon
+          style, no illustration.
+
+          Negative prompt used conceptually: cartoon, illustration, anime, CGI,
+          3D render, visible security camera, photo of camera, fisheye extreme
+          distortion, close-up portrait, cropped people, missing feet, blurry
+          face, unrealistic anatomy, extra limbs, unreadable warped bodies,
+          watermark, logo, readable text, floating objects, empty store, no
+          people, low detail, dramatic cinematic angle.
+    parameters:
+      retry: 1
+      temperature: 1.0
+      top_p: 1.0
+      max_tokens: 1024
+      stream: false
+
+augmentation:
+  model:
+    # This must match the endpoint id above so the BYOM resolver selects the
+    # Cosmos 3 Super T2I endpoint.
+    name: "cosmos3-super-text2image"
+    version: "super"
+  parameters:
+    inference_type: text2world
+    negative_prompt: "cartoon, illustration, anime, CGI, 3D render, visible security camera, dome camera, box camera, wall camera, photo of camera, camera lens, camera body, camera mount, mounting bracket, camera cable, foreground wall device, recording device, camera reflection, fisheye extreme distortion, close-up portrait, cropped people, missing feet, blurry face, unrealistic anatomy, extra limbs, unreadable warped bodies, timestamp, UI overlay, watermark, logo, readable text, floating objects, empty store, empty scene, no people, low detail, dramatic cinematic angle, stylized filter"
+    # 1024x576 was verified with the Cosmos 3 Super T2I Lepton endpoint. Some
+    # smaller 16:9 sizes can fail the model's distributed sequence-length
+    # divisibility constraint.
+    size: "1024x576"
+    width: 1024
+    height: 576
+    seed: 42
+    num_inference_steps: 50
+    guidance_scale: 6.0
+    extra_params:
+      guardrails: false
+
+evaluators: []

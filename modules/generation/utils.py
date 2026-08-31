@@ -9,6 +9,8 @@ import time
 
 from typing import Dict, Optional, Tuple
 
+import multistorageclient as msc
+
 
 def generate_with_retries(
     generator,
@@ -96,6 +98,60 @@ def video_format_unsupported(
         return f"H.264 profile {profile!r} (NVDEC decodes 8-bit 4:2:0 only)"
     if not pix_fmt_is_decodable(pix_fmt):
         return f"pixel format {pix_fmt!r} (NVDEC decodes 8-bit 4:2:0 only)"
+    return None
+
+
+# Container signatures, matched on leading bytes rather than extension: an
+# endpoint's bytes land at whatever path the config named, so a WebM payload
+# routinely arrives called ``.mp4``.
+_CONTAINER_SIGNATURES = (
+    (b"\x1a\x45\xdf\xa3", 0, "Matroska/WebM"),
+    (b"ftyp", 4, "MP4/MOV"),
+    (b"RIFF", 0, "AVI/RIFF"),
+    (b"OggS", 0, "Ogg"),
+    (b"FLV\x01", 0, "FLV"),
+)
+
+# The only container this image's FFmpeg can demux (build enables demuxer=mov).
+SUPPORTED_CONTAINER = "MP4/MOV"
+
+
+def sniff_container(path: str) -> Optional[str]:
+    """Identify a media container from its magic bytes, or None if unrecognized."""
+    try:
+        with msc.open(path, "rb") as f:
+            head = f.read(16)
+    # Runs inside decode error handlers, so it must never throw and mask the
+    # original failure; a remote read can fail with more than OSError.
+    except Exception:
+        return None
+    for signature, offset, name in _CONTAINER_SIGNATURES:
+        if head[offset : offset + len(signature)] == signature:
+            return name
+    return None
+
+
+def decode_failure_hint(error_text: str, path: Optional[str] = None) -> Optional[str]:
+    """Explain a decode failure caused by this image's restricted FFmpeg build.
+
+    The build reports "cannot read that" the same way it reports a corrupt file,
+    so return an actionable line for the known limits, or None otherwise.
+    """
+    if "cuvid" in error_text.lower():
+        return (
+            "H.264 decoding requires a GPU in this image (hardware h264_cuvid "
+            "decoder; software AVC decode is disabled for licensing). Run the "
+            "container with --gpus and NVIDIA_DRIVER_CAPABILITIES including 'video'."
+        )
+    container = sniff_container(path) if path else None
+    if container and container != SUPPORTED_CONTAINER:
+        return (
+            f"Input is a {container} container, which this image's FFmpeg cannot "
+            f"demux — only {SUPPORTED_CONTAINER} is enabled. The file extension is "
+            "not the container: an endpoint returning VP9 in WebM produces this "
+            "even when the path ends in .mp4. Remux to MP4 "
+            "(ffmpeg -i in -c copy out.mp4) or configure the endpoint to return MP4."
+        )
     return None
 
 

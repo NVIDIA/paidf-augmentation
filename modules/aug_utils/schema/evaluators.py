@@ -51,7 +51,17 @@ class VLMVerificationEvaluator(BaseModel):
     executor_type: Optional[Literal["local", "remote"]] = Field(default=None)
     url: Optional[str] = Field(default=None)
     system_prompt: str = Field(default="")
+    frames: int = Field(
+        default=1,
+        ge=1,
+        description="Frames to sample from a video, evenly spaced (1 = first frame "
+        "only). Use >1 so a mid-video event is visible to the VLM.",
+    )
     parameters: BaseInferenceParameters = Field(default_factory=BaseInferenceParameters)
+    endpoint_id: Optional[str] = Field(
+        default=None,
+        description="Pick a specific endpoints[].id; defaults to the single endpoint of the matching role",
+    )
 
     @model_validator(mode="after")
     def validate_remote_executor(self):
@@ -70,7 +80,17 @@ class QuestionGenerationConfig(BaseModel):
     """LLM-based MCQ question generation for attribute verification."""
 
     system_prompt: str = Field(default="")
+    generate_options: bool = Field(
+        default=False,
+        description="Let the LLM invent the distractor options instead of drawing "
+        "from verification_options. The correct answer still stays pinned to the "
+        "variable's (ground-truth) value.",
+    )
     parameters: BaseInferenceParameters = Field(default_factory=BaseInferenceParameters)
+    endpoint_id: Optional[str] = Field(
+        default=None,
+        description="Pick a specific endpoints[].id; defaults to the single endpoint of the matching role",
+    )
 
 
 class ExtraQuestion(BaseModel):
