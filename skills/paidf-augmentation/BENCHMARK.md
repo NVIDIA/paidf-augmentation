@@ -9,7 +9,7 @@ Recommended for publication based on the completed evaluation evidence in this r
 ## Evaluation Metadata
 
 - Skill: `paidf-augmentation`
-- Evaluation date: 2026-08-31
+- Evaluation date: 2026-09-01
 - Evaluator version: `1.3.2`
 - Agents: Claude Code (`aws/anthropic/bedrock-claude-opus-4-8`), Codex (`openai/openai/gpt-5.5`)
 - Tasks: 13 evaluation tasks (12 positive, 1 negative)
@@ -27,7 +27,7 @@ Each task attempt ran in its own isolated sandbox pod.
 - Evaluator version: `1.3.2`
 - Git commit: `fed6620cbc44a5e8d7e78ab0dd044258b667efc7`
 - Content type: requested `auto`, detected `skill`
-- Container image: internal NVSkills-Eval CI image (`skillevaluator-ci:sha-fed6620`)
+- Container image: `gitlab-master.nvidia.com:5005/nvcarps/ci-group/nvcarps-ci/skillevaluator-ci:sha-fed6620cbc44a5e8d7e78ab0dd044258b667efc7`
 - Container image digest: `not recorded`
 - Tier 3: requested `true`, executed `true`, status `succeeded`
 
@@ -45,12 +45,12 @@ The three-tier evaluation checks whether the skill:
 
 | Measure | Claude Code (Baseline → Skill Uplift) | Codex (Baseline → Skill Uplift) |
 |---|---:|---:|
-| Overall | 52% → 91% (+39 points) | 52% → 88% (+36 points) |
-| Security | 92% → 100% (+8 points) | 73% → 92% (+19 points) |
-| Correctness | 38% → 100% (+62 points) | 63% → 97% (+34 points) |
-| Discoverability | 54% → 88% (+35 points) | 46% → 78% (+32 points) |
-| Effectiveness | 36% → 87% (+51 points) | 39% → 89% (+49 points) |
-| Efficiency | 42% → 82% (+41 points) | 40% → 86% (+46 points) |
+| Overall | 52% → 93% (+41 points) | 49% → 86% (+37 points) |
+| Security | 100% → 100% (±0 points) | 73% → 92% (+19 points) |
+| Correctness | 45% → 100% (+55 points) | 49% → 91% (+42 points) |
+| Discoverability | 42% → 92% (+50 points) | 48% → 79% (+31 points) |
+| Effectiveness | 41% → 88% (+47 points) | 40% → 88% (+48 points) |
+| Efficiency | 33% → 83% (+50 points) | 36% → 81% (+45 points) |
 
 **How to read this table:** baseline is the same task attempted without the target skill. Uplift is `skill score - baseline score`, shown in percentage points.
 
