@@ -9,13 +9,13 @@ NVIDIA <br>
 ### License/Terms of Use: <br>
 Apache 2.0 <br>
 ## Use Case: <br>
-Developers and engineers use this skill to drive the PAIDF augmentation pipeline end to end — authoring and validating YAML configs, running remote generative AI inference (Cosmos Transfer, Cosmos Predict, image-edit, image-to-video), and configuring captioning and evaluation stages. <br>
+Developers and engineers use this skill to drive the PAIDF augmentation pipeline — selecting generative-AI models, authoring and validating YAML configs, configuring captioning and evaluators, and launching remote inference for video and image augmentation. <br>
 
 ### Deployment Geography for Use: <br>
 Global <br>
 
 ## Requirements / Dependencies: <br>
-**Requires API Key or External Credential:** [Optional] <br>
+**Requires API Key or External Credential:** [Yes] <br>
 **Credential Type(s):** [API key] <br>
 
 Do not include secrets in prompts/logs/output; use least-privilege credentials; rotate keys as appropriate. <br>
@@ -25,19 +25,19 @@ Risk: Review before execution as proposals could introduce incorrect or misleadi
 Mitigation: Review and scan skill before deployment. <br>
 
 ## Reference(s): <br>
-- [Configuration Schema](references/configuration-schema.md) <br>
-- [Config Decision Tree](references/config-decision-tree.md) <br>
-- [Pipeline Operations](references/pipeline-operations.md) <br>
-- [Captioning Strategy Guide](references/captioning-strategy-guide.md) <br>
-- [Evaluator Setup Guide](references/evaluator-setup-guide.md) <br>
-- [Troubleshooting](references/troubleshooting.md) <br>
-- [Image Attribute Augmentation](references/image-attribute-augmentation.md) <br>
-- [Event Video Generation](references/event-video-gen.md) <br>
+- [configuration-schema.md](references/configuration-schema.md) <br>
+- [config-decision-tree.md](references/config-decision-tree.md) <br>
+- [pipeline-operations.md](references/pipeline-operations.md) <br>
+- [captioning-strategy-guide.md](references/captioning-strategy-guide.md) <br>
+- [evaluator-setup-guide.md](references/evaluator-setup-guide.md) <br>
+- [troubleshooting.md](references/troubleshooting.md) <br>
+- [image-attribute-augmentation.md](references/image-attribute-augmentation.md) <br>
+- [event-video-gen.md](references/event-video-gen.md) <br>
 
 
 ## Skill Output: <br>
 **Output Type(s):** [Shell commands, Configuration instructions, Analysis] <br>
-**Output Format:** [Markdown with inline bash code blocks and YAML] <br>
+**Output Format:** [Markdown with inline bash and YAML code blocks] <br>
 **Output Parameters:** [1D] <br>
 **Other Properties Related to Output:** [None] <br>
 
@@ -48,35 +48,35 @@ Mitigation: Review and scan skill before deployment. <br>
 
 
 ## Evaluation Tasks: <br>
-Evaluated against 13 tasks (12 positive, 1 negative) from a curated evaluation dataset, each run in an isolated sandbox pod. <br>
+13 evaluation tasks (12 positive, 1 negative) run in isolated sandbox pods. <br>
 
 ## Evaluation Metrics Used: <br>
 Reported benchmark dimensions: <br>
 - Security: Checks for unsafe operations, secret leakage, and unauthorized access. <br>
 - Correctness: Checks final-answer correctness against the reference answer. <br>
 - Discoverability: Checks whether the expected skill was found and executed when needed. <br>
-- Effectiveness: Checks whether the user's goal was achieved and the expected workflow behavior was followed. <br>
+- Effectiveness: Checks whether the user's goal was achieved and expected workflow behavior was followed. <br>
 - Efficiency: Checks routing quality, workspace-aware skill reads, and productive tool use. <br>
 
 Underlying evaluation signals used in this run: <br>
-- `security`: Detects unsafe operations, secret leakage, and unauthorized access. <br>
-- `accuracy`: Verifies final-answer correctness against the reference answer. <br>
-- `skill_execution`: Verifies the expected skill was found and executed. <br>
-- `goal_accuracy`: Verifies whether the user's goal was achieved. <br>
-- `behavior_check`: Verifies the expected workflow behavior was followed. <br>
-- `skill_efficiency`: Verifies routing quality and productive tool use. <br>
+- `security`: Unsafe operations, secret leakage, and unauthorized access. <br>
+- `accuracy`: Final-answer correctness against the reference answer. <br>
+- `skill_execution`: Whether the expected skill was found and executed. <br>
+- `goal_accuracy`: Whether the user's goal was achieved. <br>
+- `behavior_check`: Whether the expected workflow behavior was followed. <br>
+- `skill_efficiency`: Routing quality, workspace-aware skill reads, and productive tool use. <br>
 
 
 
 ## Evaluation Results: <br>
 | Measure | Claude Code (Baseline → Skill Uplift) | Codex (Baseline → Skill Uplift) |
 |---|---:|---:|
-| Overall | 52% → 91% (+39 points) | 52% → 88% (+36 points) |
-| Security | 92% → 100% (+8 points) | 73% → 92% (+19 points) |
-| Correctness | 38% → 100% (+62 points) | 63% → 97% (+34 points) |
-| Discoverability | 54% → 88% (+35 points) | 46% → 78% (+32 points) |
-| Effectiveness | 36% → 87% (+51 points) | 39% → 89% (+49 points) |
-| Efficiency | 42% → 82% (+41 points) | 40% → 86% (+46 points) |
+| Overall | 52% → 93% (+41 points) | 49% → 86% (+37 points) |
+| Security | 100% → 100% (±0 points) | 73% → 92% (+19 points) |
+| Correctness | 45% → 100% (+55 points) | 49% → 91% (+42 points) |
+| Discoverability | 42% → 92% (+50 points) | 48% → 79% (+31 points) |
+| Effectiveness | 41% → 88% (+47 points) | 40% → 88% (+48 points) |
+| Efficiency | 33% → 83% (+50 points) | 36% → 81% (+45 points) |
 
 ## Skill Version(s): <br>
 1.1.0 (source: frontmatter, pyproject.toml) <br>
